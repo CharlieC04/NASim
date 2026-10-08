@@ -32,6 +32,42 @@ class SLM:
         )
 
 @dataclass(frozen=True)
+class Zone:
+
+    """
+    Each zone has ONE SLM for now
+    """
+
+    name: str
+    kind: str
+    slm: SLM
+
+    @property
+    def sites(self) -> tuple[Position, ...]:
+        return self.slm.sites
+
+    def contains(self, pos: Position) -> bool:
+        x0 = self.slm.origin.x
+        x1 = self.slm.origin.x + self.slm.cols * self.slm.pitch_x_um
+        y0 = self.slm.origin.y
+        y1 = self.slm.origin.y + self.slm.rows * self.slm.pitch_y_um
+
+        return min(x0, x1) <= pos.x <= max(x0, x1) and min(y0, y1) <= pos.y <= max(y0, y1)
+
+def _slm_bbox(slm: SLM) -> tuple[float, float, float, float]:
+    x0 = slm.origin.x
+    x1 = slm.origin.x + (slm.cols - 1) * slm.pitch_x_um
+    y0 = slm.origin.y
+    y1 = slm.origin.y + (slm.rows - 1) * slm.pitch_y_um
+
+    return min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
+
+def _slms_overlap(a: SLM, b: SLM) -> bool:
+    ax0, ay0, ax1, ay1 = _slm_bbox(a)
+    bx0, by0, bx1, by1 = _slm_bbox(b)
+    return ax0 <= bx1 and bx0 <= ax1 and ay0 <= by1 and by0 <= ay1
+
+@dataclass(frozen=True)
 class Device:
     """
     A 2D grid of trap sites for a given machine model
@@ -39,6 +75,7 @@ class Device:
 
     model: Model
     slms: tuple[SLM, ...]
+    zones: tuple[Zone, ...] = ()
     sites: tuple[Position, ...] = field(init=False, default=())
 
     def __post_init__(self) -> None:
@@ -66,6 +103,30 @@ class Device:
             model=model,
             slms=(SLM(rows=rows, cols=cols, pitch_x_um=pitch_um, pitch_y_um=pitch_um),)
         )
+
+    @classmethod
+    def zoned(cls, model: Model, *, storage_rows: int, storage_cols: int, storage_pitch_um: float,
+              entanglement_rows: int, entanglement_cols: int, entanglement_pitch: float, gap_um: float = 10.0):
+
+        storage = SLM(rows=storage_rows, cols=storage_cols, pitch_x_um=storage_pitch_um, pitch_y_um=storage_pitch_um)
+        storage_height = (storage_rows - 1) * storage_pitch_um
+        entanglement = SLM(rows=entanglement_rows, cols=entanglement_cols, pitch_x_um=entanglement_pitch, pitch_y_um=entanglement_pitch,
+                           origin=Position(0.0, storage_height + gap_um, 0.0))
+
+        if _slms_overlap(storage, entanglement):
+            raise ValueError("Zones overlap")
+
+        zones = (
+            Zone(name="storage", kind="storage", slm=storage),
+            Zone(name="entanglement", kind="entanglement", slm=entanglement)
+        )
+
+        return cls(model=model, slms=(storage, entanglement), zones=zones)
+
+    def zone_of(self, pos: Position) -> Zone | None:
+        for zone in self.zones:
+            if zone.contains(pos):
+                return zone
 
     @property
     def min_site_spacing_um(self) -> float:

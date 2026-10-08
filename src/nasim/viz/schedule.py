@@ -108,9 +108,10 @@ def _surgery_status(idx: int, total: int, group: list) -> str:
 
 class ScheduleViewer:
 
-    def __init__(self, initial: Placement, schedule: Schedule, circuit):
+    def __init__(self, initial: Placement, schedule: Schedule, circuit, device=None):
         self.schedule = schedule
         self.circuit = circuit
+        self.device = device
         self.groups = group_ops_for_display(schedule.ops)
         self.snapshots = snapshots_from_schedule(initial, self.groups)
         self.frame_idx = 0
@@ -140,6 +141,12 @@ class ScheduleViewer:
             for _, _, pos in snap.atoms():
                 xs.append(pos.x)
                 ys.append(pos.y)
+        if self.device is not None:
+            from nasim.viz.device import zone_bbox_padded
+            for zone in self.device.zones:
+                x0, y0, x1, y1 = zone_bbox_padded(zone)
+                xs.extend([x0, x1])
+                ys.extend([y0, y1])
         if not xs:
             return (-margin_um, margin_um), (-margin_um, margin_um)
         return (min(xs) - margin_um, max(xs) + margin_um), (min(ys) - margin_um, max(ys) + margin_um)
@@ -166,7 +173,7 @@ class ScheduleViewer:
         highlights: list[dict] = []
 
         if idx == 0:
-            plot_placement(placement, ax=ax)
+            plot_placement(placement, ax=ax, device=self.device)
             status = "initial placement"
         else:
             group = self.groups[idx - 1]
@@ -185,18 +192,18 @@ class ScheduleViewer:
                     origin_qubit = group[0].targets[0][0]
                     qubits = [origin_qubit]
                 plot_placement(placement, ax=ax, targeted_qubits={origin_qubit}, pulse_active=True,
-                                highlight_color=_MERGE_COLOR, pulse_color=_MERGE_PULSE)
+                                highlight_color=_MERGE_COLOR, pulse_color=_MERGE_PULSE, device=self.device)
                 if len(qubits) == 2:
                     highlights.append({"stage": stage_idx, "qubits": qubits, "color": _MERGE_COLOR, "kind": "2q_active"})
             elif group[0].kind == "1q_stage":
                 op = group[0]
                 targeted = set(op.detail["qubits"])
-                plot_placement(placement, ax=ax, targeted_qubits=targeted, pulse_active=True)
+                plot_placement(placement, ax=ax, targeted_qubits=targeted, pulse_active=True, device=self.device)
                 status = f"frame {idx}/{total}: 1Q gate stage - targets={sorted(targeted)}"
                 highlights.append({"stage": stage_idx, "qubits": sorted(targeted), "color": _ONEQ_COLOR, "kind": "1q"})
             elif group[0].kind == "move_frame":
                 op = group[0]
-                plot_placement(placement, ax=ax)
+                plot_placement(placement, ax=ax, device=self.device)
                 for move in op.detail["moves"]:
                     ax.annotate(
                         "", xy=(move.target.x, move.target.y),
@@ -211,7 +218,7 @@ class ScheduleViewer:
                             highlights.append({"stage": stage_idx, "qubits": gate.qubits, "color": _MOVE_COLOR, "kind": "2q_pending"})
             else:
                 op = group[0]
-                plot_placement(placement, ax=ax)
+                plot_placement(placement, ax=ax, device=self.device)
                 status = f"frame {idx}/{total}: {op.kind}"
 
         ax.set_title(ax.get_title() + f"\n{status}")
