@@ -1,0 +1,40 @@
+name: harvard_2d
+description: >
+  Single-layer zoned NA device based on Lukin group
+dimensions: 2D
+
+geometry:
+  layers: 1
+  layer_spacing_um: 0.0
+  sites:
+    grid: null
+  gate_pair_dist_um: 2.5
+
+interaction:
+  blockade_radius_um: 5.0
+
+transport:
+  v_xy_um_per_us: 0.55
+  v_loss_um_per_us: 1.0
+  handover_time_us: 15.0
+  handover_fidelity: 0.999
+  move_profile: min_jerk
+
+addressing:
+  trap_beam_waist_um: [0.8,1.2]
+  local_1q_beam_waist_um: [1.0,1.5]
+  global_drive_beam_waist_um: ">=100"
+
+readout:
+  fidelity: 0.998
+  time_us: 500.0
+
+gates:
+  cz_fidelity: 0.995
+  cz_duration_us: 0.36
+  single_qubit_fidelity: 0.9975
+  single_qubit_duration_us: 0.625
+  carrier_fidelity: 0.9997
+
+coherence:
+  t2_s: 12.6
