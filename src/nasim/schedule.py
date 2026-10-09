@@ -10,6 +10,7 @@ from nasim.placement import Placement, PlacedPatch
 from nasim.geometry import Position
 from nasim.surface_code import AtomRole, Patch, _ancilla_weight_counts, Edge
 from nasim.lattice_surgery import merge_patches
+from nasim.device import Device
 
 AtomId = tuple[int, tuple[int, int]] # (qubit, local coord)
 
@@ -46,6 +47,7 @@ class Schedule:
 
     model: Model
     all_atoms: set[AtomId]
+    device: Device | None = None
     clock_us: float = 0.0
     ops: list[ScheduleOp] = field(default_factory=list)
 
@@ -54,6 +56,7 @@ class Schedule:
     Ng2: int = 0
     Nh: int = 0
     Nmeas: int = 0
+    Nxtalk: int = 0
 
     idle_us: dict[AtomId, float] = field(default_factory=dict)
 
@@ -61,6 +64,25 @@ class Schedule:
         self.all_atoms = set(self.all_atoms)
         for atom in self.all_atoms:
             self.idle_us.setdefault(atom, 0.0)
+
+    def _entanglement_zone_bystanders(self, placement: Placement, exclude: set[int]) -> tuple[AtomId, ...]:
+
+        """
+        AtomId of every patch in entanglement zone
+        """
+
+        if self.device is None or not self.device.zones: return ()
+
+        ent_zones = [z for z in self.device.zones if z.kind == "entanglement"]
+        if not ent_zones: return ()
+
+        bystanders: list[AtomId] = []
+        for p in placement.patches:
+            if p.qubit in exclude: continue
+            if any(z.contains(p.anchor) for z in ent_zones):
+                bystanders.extend((p.qubit, atom.local) for atom in p.patch.atoms)
+
+        return tuple(bystanders)
 
     def _advance(self, targets: list[AtomId], duration_us: float) -> float:
         start_us = self.clock_us
@@ -135,7 +157,7 @@ class Schedule:
             detail={"qubits": [m.qubit for m in frame], "moves": tuple(frame)}
         ))
 
-    def _record_syndrome_round(self, merged_patch: Patch, targets: list[AtomId]) -> None:
+    def _record_syndrome_round(self, merged_patch: Patch, targets: list[AtomId], bystanders: tuple[AtomId, ...] = ()) -> None:
 
         """
         Round = 4 sequential CZ pulses (naive)
@@ -148,6 +170,7 @@ class Schedule:
             start_us = self._advance(targets, cz_duration)
             active = interior_count + (boundary_count if step < 2 else 0)
             self.Ng2 += active
+            self.Nxtalk += len(bystanders)
             self.ops.append(ScheduleOp(
                 kind="2q_substep", start_us=start_us, duration_us=cz_duration,
                 targets=tuple(targets), detail={"substep": step, "active_gates": active}
@@ -204,8 +227,9 @@ class Schedule:
         if rounds is None:
             rounds = merged_patch.distance
         targets = list(after_ids)
+        bystanders = self._entanglement_zone_bystanders(placement, exclude={qubit_a, qubit_b})
         for _ in range(rounds):
-            self._record_syndrome_round(merged_patch, targets)
+            self._record_syndrome_round(merged_patch, targets, bystanders)
 
         return origin_qubit, merged_patch, anchor
 
@@ -256,7 +280,7 @@ def simulate_one_qubit_circuit(circuit: Circuit, placement: Placement, model: Mo
 
     return schedule
 
-def circuit_fidelity(schedule: Schedule) -> float:
+def circuit_fidelity(schedule: Schedule, *, d: int) -> float:
 
     """
     Estimate circuit fidelity using 
@@ -267,13 +291,20 @@ def circuit_fidelity(schedule: Schedule) -> float:
     model = schedule.model
     f = model.single_qubit_fidelity ** schedule.Ng1
     f *= model.carrier_fidelity ** schedule.Nsp
-    f *= model.cz_fidelity ** schedule.Ng2
     f *= model.handover_fidelity ** schedule.Nh
-    f *= model.readout_fidelity ** schedule.Nmeas
+    f *= model.carrier_fidelity ** schedule.Nxtalk
 
     t2_us = model.t2_s * 1e6
     for t_idle in schedule.idle_us.values():
         f *= math.exp(-t_idle / t2_us)
+
+    num_rounds = sum(1 for op in schedule.ops if op.kind == "mid_circuit_measure")
+    if num_rounds:
+        d_e = (d + 1) // 2 if d % 2 == 1 else d // 2
+        p = 1.0 - model.cz_fidelity
+        p_th = 0.0057 # fowler paper
+        pl_per_round = min(1.0, 0.03 * (p / p_th) ** d_e)
+        f *= (1.0 - pl_per_round) ** num_rounds
 
     return f
 
@@ -313,7 +344,7 @@ def _site_is_free(target_anchor: Position, radius: float, placement: Placement, 
 
     return True
 
-def _retarget_adjacent(placement: Placement, qa: int, qb: int, committed: list[Move], *, lambda_par: float = 25.0) -> Placement:
+def _retarget_adjacent(placement: Placement, qa: int, qb: int, committed: list[Move], *, lambda_par: float = 25.0, site_filter=None) -> Placement:
 
     """
     Move qb to sit to the right of qa
@@ -336,6 +367,7 @@ def _retarget_adjacent(placement: Placement, qa: int, qb: int, committed: list[M
     for edge in _CAND_EDGES:
         target_anchor = _cand_anchor(pa, edge, width, height)
         if not _site_is_free(target_anchor, radius, placement, exclude_qubit=qb): continue
+        if site_filter is not None and not site_filter(target_anchor): continue
 
         candidate = Move(
             qubit=qb, source=pb.anchor, target=target_anchor,
@@ -353,9 +385,122 @@ def _retarget_adjacent(placement: Placement, qa: int, qb: int, committed: list[M
 
     return Placement(model=placement.model, patches=patches), best_move
 
-def simulate_circuit(circuit: Circuit, placement: Placement, model: Model) -> tuple[Schedule, Placement]:
+def _site_anchor(site: Position, patch: Patch, unit_um: float) -> Position:
 
-    schedule = Schedule(model=model, all_atoms=set(_all_atom_ids(placement)))
+    min_x, min_y, _, _ = patch.local_bounds
+    return Position(site.x - min_x * unit_um, site.y - min_y * unit_um, site.z)
+
+def _nearest_free_zone_site(zone, placement: Placement, patch: Patch, unit_um: float, anchor: Position, *, radius: float, exclude_qubit: int) -> Position | None:
+
+    best_site, best_d = None, math.inf
+    for site in zone.sites:
+        candidate = _site_anchor(site, patch, unit_um)
+        if not _site_is_free(candidate, radius, placement, exclude_qubit=exclude_qubit): continue
+        d = math.hypot(candidate.x - anchor.x, candidate.y - anchor.y)
+        if d < best_d:
+            best_d, best_site = d, candidate
+
+    return best_site
+
+def _retarget_pair_into_entanglement_zone(placement: Placement, device: Device, qa: int, qb: int, committed: list[Move], *, lambda_par: float = 25.0):
+
+    """
+    If qa not in Ez, move to nearest free site. Then place qb touching it
+    """
+
+    pa = next(p for p in placement.patches if p.qubit == qa)
+    pb = next(p for p in placement.patches if p.qubit == qb)
+    if pa.patch.distance != pb.patch.distance:
+        raise ValueError("Patches have different distances")
+
+    ent_zones = [z for z in device.zones if z.kind == "entanglement"]
+    if not ent_zones:
+        placement2, move = _retarget_adjacent(placement, qa, qb, committed, lambda_par=lambda_par)
+        return placement2, [move]
+
+    ent_zone = ent_zones[0]
+    unit_um = placement.model.gate_pair_dist_um
+    radius_a = pa.patch.radius_um(unit_um)
+
+    moves: list[Move] = []
+    working = placement
+
+    if not ent_zone.contains(pa.anchor):
+        target = _nearest_free_zone_site(ent_zone, working, pa.patch, unit_um, pa.anchor, radius=radius_a, exclude_qubit=qa)
+        if target is None: raise ValueError("No free Ez site")
+
+        move_a = Move(qubit=qa, source=pa.anchor, target=target, clearance_um=radius_a)
+        patches = tuple(
+            PlacedPatch(qubit=p.qubit, patch=p.patch, anchor=target if p.qubit == qa else p.anchor)
+            for p in working.patches
+        )
+        working = Placement(model=working.model, patches=patches)
+        moves.append(move_a)
+
+    working, move_b = _retarget_adjacent(
+        working, qa, qb, committed + moves, lambda_par=lambda_par, site_filter=ent_zone.contains
+    )
+    moves.append(move_b)
+    return working, moves
+
+def _stages_until_next_2q(circuit: Circuit, qubit: int, from_stage_idx: int) -> int | None:
+
+    for ofs, stage in enumerate(circuit.stages[from_stage_idx + 1:], start=1):
+        for gate in stage:
+            if gate.type is GateType.TWO_QUBIT and qubit in gate.qubits:
+                return ofs
+
+def _idle_qubit_management(circuit: Circuit, stage_idx: int, placement: Placement, device: Device, model: Model, involved: set[int]):
+
+    """
+    ZAC eqs: compare cost of staying in Ez vs returning to Sz
+    """
+
+    ent_zones = [z for z in device.zones if z.kind == "entanglement"]
+    storage_zones = [z for z in device.zones if z.kind == "storage"]
+    if not ent_zones or not storage_zones: return placement, []
+    ent_zone, storage_zone = ent_zones[0], storage_zones[0]
+
+    resident = [
+        p.qubit for p in placement.patches
+        if p.qubit not in involved and ent_zone.contains(p.anchor)
+    ]
+    if not resident: return placement, []
+
+    t2_us = model.t2_s * 1e6
+    neg_ln_carrier = -math.log(model.carrier_fidelity)
+    neg_ln_handover = -math.log(model.handover_fidelity)
+
+    moves: list[Move] = []
+    working = placement
+    for q in resident:
+        p = next(pp for pp in working.patches if pp.qubit == q)
+        radius = p.patch.radius_um(model.gate_pair_dist_um)
+        target = _nearest_free_zone_site(storage_zone, working, p.patch, model.gate_pair_dist_um, p.anchor, radius=radius, exclude_qubit=q)
+
+        if target is None: continue
+
+        k = _stages_until_next_2q(circuit, q, stage_idx)
+        candidate = Move(qubit=q, source=p.anchor, target=target, clearance_um=radius)
+        move_time = move_duration_us(candidate, model)
+        n_tr = 4 if k is not None else 2
+        cost_leave = n_tr * neg_ln_handover + (n_tr / 2) * (move_time / t2_us)
+        cost_stay = (k * neg_ln_carrier) if k is not None else math.inf
+        should_return = cost_stay > cost_leave
+
+        if should_return:
+            patches = tuple(
+                PlacedPatch(qubit=pp.qubit, patch=pp.patch, anchor=target if pp.qubit == q else pp.anchor)
+                for pp in working.patches
+            )
+            working = Placement(model=working.model, patches=patches)
+            moves.append(candidate)
+
+    return working, moves
+
+def simulate_circuit(circuit: Circuit, placement: Placement, model: Model, device: Device | None = None) -> tuple[Schedule, Placement]:
+
+    schedule = Schedule(model=model, all_atoms=set(_all_atom_ids(placement)), device=device)
     current = placement
 
     for stage_idx, stage in enumerate(circuit.stages):
@@ -371,14 +516,27 @@ def simulate_circuit(circuit: Circuit, placement: Placement, model: Model) -> tu
             if len(involved) != len(set(involved)):
                 raise NotImplementedError("A qubit appears in >1 2Q gate")
 
-            target_placement = current
-            committed_moves: list[Move] = []
+            stage_start = current
+            working = current
+            idle_moves: list[Move] = []
+            if device is not None and device.zones:
+                working, idle_moves = _idle_qubit_management(circuit, stage_idx, working, device, model, set(involved))
+
+            target_placement = working
+            committed_moves: list[Move] = list(idle_moves)
             for gate in two_qubit_gates:
                 qa, qb = gate.qubits
-                target_placement, move = _retarget_adjacent(target_placement, qa, qb, committed_moves)
-                committed_moves.append(move)
+                if device is not None and device.zones:
+                    target_placement, moves = _retarget_pair_into_entanglement_zone(target_placement, device, qa, qb, committed_moves)
+                    committed_moves.extend(moves)
+                else:
+                    target_placement, move = _retarget_adjacent(target_placement, qa, qb, committed_moves)
+                    committed_moves.append(move)
 
-            frames = legalise_frames(moves_between(current, target_placement))
+            moves = moves_between(current, target_placement)
+            moving_qubits = {m.qubit for m in moves}
+            stationary = [p.anchor for p in current.patches if p.qubit not in moving_qubits]
+            frames = legalise_frames(moves, stationary)
             for frame in frames:
                 schedule.record_move_frame(frame, current)
             current = target_placement

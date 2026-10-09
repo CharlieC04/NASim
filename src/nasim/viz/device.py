@@ -8,6 +8,38 @@ from nasim.device import Device
 from nasim.placement import Placement
 from nasim.surface_code import AtomRole
 
+_ZONE_FACE = {"storage": "#f7fafc", "entanglement": "#ebf8ff"}
+_ZONE_EDGE = {"storage": "#cbd5e0", "entanglement": "#90cdf4"}
+
+def _zone_bbox(zone) -> tuple[float, float, float, float]:
+
+    slm = zone.slm
+    x0 = slm.origin.x
+    x1 = slm.origin.x + slm.cols * slm.pitch_x_um
+    y0 = slm.origin.y
+    y1 = slm.origin.y + slm.rows * slm.pitch_y_um
+    return min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
+
+def zone_bbox_padded(zone, *, pad_um: float = 3.0) -> tuple[float, float, float, float]:
+
+    x0, y0, x1, y1 = _zone_bbox(zone)
+    return x0 - pad_um, y0 - pad_um, x1 + pad_um, y1 + pad_um
+
+def plot_zones(device: Device, ax: Axes) -> None:
+
+    for zone in device.zones:
+        x0, y0, x1, y1 = _zone_bbox(zone)
+        face = _ZONE_FACE.get(zone.kind, "#f7fafc")
+        edge = _ZONE_EDGE.get(zone.kind, "#cbd5e0")
+        ax.add_patch(Rectangle(
+            (x0, y0), x1 - x0, y1 - y0,
+            facecolor=face, edgecolor=edge, linewidth=1.5, zorder=-2,
+        ))
+        ax.annotate(
+            zone.kind, (x0, y0), xytext=(4, 4), textcoords="offset points",
+            ha="left", va="bottom", fontsize=11, fontweight="bold", color=edge, zorder=-1,
+        )
+
 def _device_bounds(placement: Placement) -> tuple[float, float, float, float]:
     xs0, ys0, xs1, ys1 = [], [], [], []
     for placed in placement.patches:
@@ -75,9 +107,13 @@ def plot_placement(
     pulse_active: bool = False,
     highlight_color: str = "#d69e2e",
     pulse_color: str = "#fefcbf",
+    device: Device | None = None
 ) -> Axes:
     if ax is None:
         _, ax = plt.subplots(figsize=(8, 8))
+
+    if device is not None and device.zones:
+        plot_zones(device, ax)
 
     if pulse_active and placement.patches:
         x0, y0, x1, y1 = _device_bounds(placement)
