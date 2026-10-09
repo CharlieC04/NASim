@@ -358,7 +358,7 @@ def _site_is_free(target_anchor: Position, radius: float, placement: Placement, 
 
     return True
 
-def _best_candidate(placement: Placement, fixed: PlacedPatch, moving: PlacedPatch, committed: list[Move], *, lambda_par: float, site_filter) -> tuple[Move | None, Float]:
+def _best_candidate(placement: Placement, fixed: PlacedPatch, moving: PlacedPatch, committed: list[Move], *, lambda_par: float, site_filter) -> tuple[Move | None, float]:
 
     """
     Best move that puts 'moving' against on of 'fixed's edges

@@ -38,7 +38,7 @@ def main() -> None:
 
     print(f"d={DISTANCE}: {len(merges)} merges, {total_rounds} total measurement rounds (paper: {expected_rounds})")
     print(f"physical qubits: CNOT={cnot_qubits} transversal={transversal_qubits} ratio={ratio:.2f} (paper: 1.5-2x)")
-    print(f"circuit fidelity: {circuit_fidelity(schedule):.6g}")
+    print(f"circuit fidelity: {circuit_fidelity(schedule, d=DISTANCE):.6g}")
 
     assert total_rounds == expected_rounds, "doesn't match Viszlai et al. Fig. 5's stated 2d measurement rounds"
     assert 1.5 <= ratio <= 2.0, "doesn't match Viszlai et al.'s stated 1.5x-2x qubit overhead"
