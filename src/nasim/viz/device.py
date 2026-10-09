@@ -52,6 +52,7 @@ def _device_bounds(placement: Placement) -> tuple[float, float, float, float]:
     return min(xs0), min(ys0), max(xs1), max(ys1)
 
 def plot_device(device: Device, show_blockade: bool = False, ax: Axes | None = None) -> Axes:
+
     if ax is None:
         _, ax = plt.subplots(figsize=(6, 6))
 
@@ -109,6 +110,7 @@ def plot_placement(
     pulse_color: str = "#fefcbf",
     device: Device | None = None
 ) -> Axes:
+
     if ax is None:
         _, ax = plt.subplots(figsize=(8, 8))
 

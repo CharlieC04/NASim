@@ -20,6 +20,7 @@ class Edge(Enum):
 
 @dataclass(frozen=True)
 class PatchAtom:
+
     role: AtomRole
     local: tuple[int, int]
 
@@ -39,11 +40,13 @@ class Patch:
 
     @property
     def local_bounds(self) -> tuple[int, int, int, int]:
+
         xs = [a.local[0] for a in self.atoms]
         ys = [a.local[1] for a in self.atoms]
         return min(xs), min(ys), max(xs), max(ys)
 
     def radius_um(self, unit_um: float) -> float:
+
         min_x, min_y, max_x, max_y = self.local_bounds
         return 0.5 * unit_um * max(max_x - min_x, max_y - min_y)
 
@@ -54,7 +57,7 @@ class Patch:
             raise ValueError("Invalid surface code dist")
 
         return cls._build_rectangle(distance, distance, code_distance=distance)
-        
+
 
     @classmethod
     def _build_rectangle(cls, dx: int, dy: int, *, code_distance: int) -> Patch:
@@ -88,10 +91,6 @@ class Patch:
         return cls(distance=code_distance, atoms=tuple(atoms))
 
     def embed(self, anchor: Position, unit_um: float) -> list[tuple[PatchAtom, Position]]:
-        
-        """
-            Absolute positions for each atom in patch, given position of local (0,0)
-        """
 
         return [
             (
@@ -111,6 +110,10 @@ class Patch:
         return AtomRole.ANCILLA_X
 
 def _ancilla_weight_counts(patch: Patch) -> tuple[int, int]:
+
+    """(interior, boundary) ancilla counts - interior ancillas have
+    weight 4 (fire every syndrome-extraction substep), boundary ancillas
+    weight 2 (fire only the first two substeps)."""
 
     min_x, min_y, max_x, max_y = patch.local_bounds
     interior = 0

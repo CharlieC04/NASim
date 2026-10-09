@@ -48,7 +48,9 @@ def check_alignment(placement: Placement, qubit_a: int, qubit_b: int) -> None:
 def merge_patches(placement: Placement, qubit_a: int, qubit_b: int) -> tuple[Patch, Position, int]:
 
     """
-    Patch formed by merging two aligned patches
+    Build the merged patch for two aligned, adjacent qubits. Returns
+    (merged_patch, anchor, origin_qubit), where origin_qubit is whichever
+    of qubit_a/qubit_b sits at the merged patch's own local origin
     """
 
     check_alignment(placement, qubit_a, qubit_b)

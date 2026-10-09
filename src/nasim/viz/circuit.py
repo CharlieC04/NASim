@@ -50,7 +50,6 @@ def _draw_2q_symbol(ax, stage_idx: int, qa: int, qb: int, highlight: dict | None
 
 def plot_circuit(circuit: Circuit, ax, *, current_stage: int | None = None, highlights: list[dict] | None = None) -> None:
 
-
     ax.clear()
     n_qubits = circuit.num_qubits
     n_stages = len(circuit.stages)

@@ -9,10 +9,6 @@ from nasim.placement import Placement
 
 @dataclass(frozen=True)
 class Move:
-    
-    """
-    Patch relocation: straight line between anchors
-    """
 
     qubit: int
     source: Position
@@ -32,6 +28,11 @@ def move_duration_us(move: Move, model: Model) -> float:
 
 def conflict_reason(a: Move, b: Move) -> tuple[str, str] | None:
 
+    """Per-axis AOD conflict between two moves, or None if compatible on
+    both axes: "shared_source" (same start, diverging ends), 
+    "shared_target" (same end, diverging starts), or
+    "crossing" (trajectories overlap in between)."""
+
     checks = (
         (a.source.x, a.target.x, b.source.x, b.target.x, "x"),
         (a.source.y, a.target.y, b.source.y, b.target.y, "y")
@@ -44,10 +45,6 @@ def conflict_reason(a: Move, b: Move) -> tuple[str, str] | None:
         if a0 > b0 and a1 <= b1: return (axis, "crossing")
 
 def compatible_2d(a: Move, b: Move) -> bool:
-
-    """
-    Validate if 2 moves can happen at the same time, based on ZAC.
-    """
 
     if conflict_reason(a, b) is not None:
         return False
@@ -88,7 +85,7 @@ def _greedy_max_indep_set(moves: list[Move]) -> list[Move]:
 def _park(move: Move, axis: str, other: Move) -> Move:
 
     """
-    Short move to clear other conflict
+    Short orthog move to clear other conflict
     """
 
     margin = move.clearance_um + other.clearance_um
@@ -189,7 +186,6 @@ def legalise_frames(moves: list[Move], stationary: list[Position] = ()) -> list[
     """
     Partition moves into AOD frames. Repeatedly extract one maximal set of mutually compatible moves
     as a frame until all are scheduled
-    This is more simple than ZAC currently (no ring/swap-like)
     """
 
     occupied = {(p.x, p.y) for p in stationary}
