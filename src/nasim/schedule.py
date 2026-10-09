@@ -358,6 +358,32 @@ def _site_is_free(target_anchor: Position, radius: float, placement: Placement, 
 
     return True
 
+def _best_candidate(placement: Placement, fixed: PlacedPatch, moving: PlacedPatch, committed: list[Move], *, lambda_par: float, site_filter) -> tuple[Move | None, Float]:
+
+    """
+    Best move that puts 'moving' against on of 'fixed's edges
+    """
+
+    unit_um = placement.model.gate_pair_dist_um
+    min_x, min_y, max_x, max_y = fixed.patch.local_bounds
+    width = (max_x - min_x) * unit_um
+    height = (max_y - min_y) * unit_um
+    radius = moving.patch.radius_um(unit_um)
+
+    best_move, best_score = None, math.inf
+    for edge in _CAND_EDGES:
+        target_anchor = _cand_anchor(fixed, edge, width, height)
+        if not _site_is_free(target_anchor, radius, placement, exclude_qubit=moving.qubit): continue
+        if site_filter is not None and not site_filter(target_anchor): continue
+
+        candidate = Move(qubit=moving.qubit, source=moving.anchor, target=target_anchor, clearance_um=radius)
+
+        score = lambda_par * _conflict_cost(candidate, committed) + candidate.distance_um()
+        if score < best_score:
+            best_score, best_move = score, candidate
+
+    return best_move, best_score
+
 def _retarget_adjacent(placement: Placement, qa: int, qb: int, committed: list[Move], *, lambda_par: float = 25.0, site_filter=None) -> Placement:
 
     """
@@ -371,29 +397,16 @@ def _retarget_adjacent(placement: Placement, qa: int, qb: int, committed: list[M
             "Patches have different distance"
         )
 
-    unit_um = placement.model.gate_pair_dist_um
-    min_x, min_y, max_x, max_y = pa.patch.local_bounds
-    width = (max_x - min_x) * unit_um
-    height = (max_y - min_y) * unit_um
-    radius = pb.patch.radius_um(unit_um)
+    move_b, score_b = _best_candidate(placement, pa, pb, committed, lambda_par=lambda_par, site_filter=site_filter)
+    move_a, score_a = _best_candidate(placement, pa, pb, committed, lambda_par=lambda_par, site_filter=site_filter)
 
-    best_move, best_score = None, math.inf
-    for edge in _CAND_EDGES:
-        target_anchor = _cand_anchor(pa, edge, width, height)
-        if not _site_is_free(target_anchor, radius, placement, exclude_qubit=qb): continue
-        if site_filter is not None and not site_filter(target_anchor): continue
+    if move_b is None and move_a is None:
+        raise ValueError("No valid sites found")
 
-        candidate = Move(
-            qubit=qb, source=pb.anchor, target=target_anchor,
-            clearance_um=pb.patch.radius_um(unit_um)
-        )
-
-        score = lambda_par * _conflict_cost(candidate, committed) + candidate.distance_um()
-        if score < best_score:
-            best_score, best_move = score, candidate
+    best_move = move_b if (move_a is None or (move_b is not None and score_b <= score_a)) else move_a
 
     patches = tuple(
-        PlacedPatch(qubit=p.qubit, patch=p.patch, anchor=best_move.target if p.qubit == qb else p.anchor)
+        PlacedPatch(qubit=p.qubit, patch=p.patch, anchor=best_move.target if p.qubit == best_move.qubit else p.anchor)
         for p in placement.patches
     )
 
