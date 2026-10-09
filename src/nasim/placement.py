@@ -151,3 +151,97 @@ def piqasso_placement(
     )
 
     return Placement(model=model, patches=placed)
+
+def _vectors_incompat(a_src, a_dst, b_src, b_dst, a_clearance: float, b_clearance: float) -> bool:
+
+    checks = (
+        (a_src.x, a_dst.x, b_src.x, b_dst.x),
+        (a_src.y, a_dst.y, b_src.y, b_dst.y),
+    )
+    for a0, a1, b0, b1 in checks:
+        if a0 == b0 and a1 != b1: return True
+        if a1 == b1 and a0 != b0: return True
+        if a0 < b0 and a1 >= b1: return True
+        if a0 > b0 and a1 <= b1: return True
+
+    margin = a_clearance + b_clearance
+    if margin > 0:
+        d_source = math.hypot(a_src.x - b_src.x, a_src.y - b_src.y)
+        d_target = math.hypot(a_dst.x - b_dst.x, a_dst.y - b_dst.y)
+        if d_source < margin or d_target < margin: return True
+
+    return False
+
+def zap_placement(circuit: Circuit, model: Model, device: Device, *, distance: int = 3, lambda_par: float = 25.0):
+
+    """
+    Routing-aware placement based on ZAP
+    """
+
+    storage_zones = [z for z in device.zones if z.kind == "storage"]
+    ent_zones = [z for z in device.zones if z.kind == "entanglement"]
+    if not storage_zones or not ent_zones:
+        raise ValueError("Requires both zone types")
+
+    n = circuit.num_qubits
+    patch = Patch.rotated(distance)
+    unit_um = model.gate_pair_dist_um
+    radius = _patch_radius(patch, unit_um)
+    min_x, min_y, _, _ = patch.local_bounds
+
+    def site_anchor(site: Position) -> Position:
+        return Position(site.x - min_x * unit_um, site.y - min_y * unit_um, site.z)
+
+    storage_sites = [s for z in storage_zones for s in z.sites]
+    ent_sites = [s for z in ent_zones for s in z.sites]
+    if len(storage_sites) < n:
+        raise ValueError("Circuit too big to store")
+
+    def nearest_entanglement(u: Position) -> tuple[Position, float]:
+        best_e, best_d = None, math.inf
+        for e in ent_sites:
+            d = math.hypot(u.x - e.x, u.y - e.y)
+            if d < best_d:
+                best_d, best_e = d, e
+        return best_e, best_d
+
+    weight = [0.0] * n
+    for l, stage in enumerate(circuit.stages):
+        w_l = 1.0 / (l + 1)
+        for gate in stage:
+            for q in gate.qubits:
+                weight[q] += w_l
+
+    order = sorted(range(n), key=lambda q: (-weight[q], q))
+
+    anchors: list[Position | None] = [None] * n
+    used_sites: set[Position] = set()
+    committed: list[tuple[Position, Position, float]] = []
+
+    for q in order:
+        best_site, best_score, best_target = None, math.inf, None
+        for site in storage_sites:
+            if site in used_sites: continue
+
+            candidate = site_anchor(site)
+            e_star, d_min = nearest_entanglement(site)
+            target = site_anchor(e_star)
+
+            confilcts = sum(
+                1 for (src, dst, clr) in committed
+                if _vectors_incompat(candidate, target, src, dst, radius, clr)
+            )
+            score = lambda_par * confilcts + d_min
+            if score < best_score:
+                best_score, best_site, best_target = score, site, target
+
+        anchors[q] = site_anchor(best_site)
+        used_sites.add(best_site)
+        committed.append((site_anchor(best_site), best_target, radius))
+
+    placed = tuple(
+        PlacedPatch(qubit=q, patch=patch, anchor=anchors[q])
+        for q in range(n)
+    )
+
+    return Placement(model=model, patches=placed)

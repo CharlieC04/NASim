@@ -105,7 +105,43 @@ def _park(move: Move, axis: str, other: Move) -> Move:
 def _remainder(move: Move, parking: Move) -> Move:
     return Move(qubit=move.qubit, source=parking.target, target=move.target, clearance_um=move.clearance_um)
 
-def _build_frame_with_parking(moves: list[Move]) -> tuple[list[Move], list[Move]]:
+def _aod_violations(frame_moves: list[Move], occupied: set[tuple[float, float]]) -> list[tuple[float, float]]:
+
+    xs = {m.source.x for m in frame_moves}
+    ys = {m.source.y for m in frame_moves}
+    intended = {(m.source.x, m.source.y) for m in frame_moves}
+
+    return [
+        (x, y)
+        for x in xs for y in ys
+        if (x, y) not in intended and (x, y) in occupied
+    ]
+
+def _resolve_violations(moves: list[Move], occupied: set[tuple[float, float]]) -> tuple[list[Move], list[Move]]:
+
+    """
+    Remove whichever move clears most violations
+    """
+
+    remaining = list(moves)
+    removed: list[Move] = []
+
+    while True:
+        violations = _aod_violations(remaining, occupied)
+        if not violations:
+            return remaining, removed
+
+        best_qubit, best_cleared = None, -1
+        for m in remaining:
+            trial = [mv for mv in remaining if mv.qubit != m.qubit]
+            cleared = len(violations) - len(_aod_violations(trial, occupied))
+            if cleared > best_cleared:
+                best_cleared, best_qubit = cleared, m.qubit
+
+        removed.append(next(m for m in remaining if m.qubit == best_qubit))
+        remaining = [m for m in remaining if m.qubit != best_qubit]
+
+def _build_frame_with_parking(moves: list[Move], occupied: set[tuple[float, float]]) -> tuple[list[Move], list[Move]]:
 
     """
     Build a frame of concurrent moves
@@ -141,9 +177,14 @@ def _build_frame_with_parking(moves: list[Move]) -> tuple[list[Move], list[Move]
 
         deferred = still_deferred
 
-    return parking_moves, list(chosen_by_qubit.values())
+    final_moves, aod_deferred = _resolve_violations(list(chosen_by_qubit.values()), occupied)
+    if aod_deferred:
+        dropped_qubits = {m.qubit for m in aod_deferred}
+        parking_moves = [p for p in parking_moves if p.qubit not in dropped_qubits]
 
-def legalise_frames(moves: list[Move]) -> list[list[Move]]:
+    return parking_moves, final_moves
+
+def legalise_frames(moves: list[Move], stationary: list[Position] = ()) -> list[list[Move]]:
 
     """
     Partition moves into AOD frames. Repeatedly extract one maximal set of mutually compatible moves
@@ -151,6 +192,7 @@ def legalise_frames(moves: list[Move]) -> list[list[Move]]:
     This is more simple than ZAC currently (no ring/swap-like)
     """
 
+    occupied = {(p.x, p.y) for p in stationary}
     remaining = list(moves)
     frames: list[list[Move]] = []
     while remaining:
@@ -160,7 +202,7 @@ def legalise_frames(moves: list[Move]) -> list[list[Move]]:
             cycle_qubits = sorted(m.qubit for m in remaining)
             raise ValueError("Cannot make progress due to a cycle")
 
-        parking_moves, frame = _build_frame_with_parking(safe)
+        parking_moves, frame = _build_frame_with_parking(safe, occupied)
         if parking_moves:
             frames.append(parking_moves)
         scheduled = {m.qubit for m in frame}

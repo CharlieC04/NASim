@@ -280,7 +280,7 @@ def simulate_one_qubit_circuit(circuit: Circuit, placement: Placement, model: Mo
 
     return schedule
 
-def circuit_fidelity(schedule: Schedule) -> float:
+def circuit_fidelity(schedule: Schedule, *, d: int) -> float:
 
     """
     Estimate circuit fidelity using 
@@ -291,14 +291,20 @@ def circuit_fidelity(schedule: Schedule) -> float:
     model = schedule.model
     f = model.single_qubit_fidelity ** schedule.Ng1
     f *= model.carrier_fidelity ** schedule.Nsp
-    f *= model.cz_fidelity ** schedule.Ng2
     f *= model.handover_fidelity ** schedule.Nh
-    f *= model.readout_fidelity ** schedule.Nmeas
     f *= model.carrier_fidelity ** schedule.Nxtalk
 
     t2_us = model.t2_s * 1e6
     for t_idle in schedule.idle_us.values():
         f *= math.exp(-t_idle / t2_us)
+
+    num_rounds = sum(1 for op in schedule.ops if op.kind == "mid_circuit_measure")
+    if num_rounds:
+        d_e = (d + 1) // 2 if d % 2 == 1 else d // 2
+        p = 1.0 - model.cz_fidelity
+        p_th = 0.0057 # fowler paper
+        pl_per_round = min(1.0, 0.03 * (p / p_th) ** d_e)
+        f *= (1.0 - pl_per_round) ** num_rounds
 
     return f
 
@@ -527,7 +533,10 @@ def simulate_circuit(circuit: Circuit, placement: Placement, model: Model, devic
                     target_placement, move = _retarget_adjacent(target_placement, qa, qb, committed_moves)
                     committed_moves.append(move)
 
-            frames = legalise_frames(moves_between(current, target_placement))
+            moves = moves_between(current, target_placement)
+            moving_qubits = {m.qubit for m in moves}
+            stationary = [p.anchor for p in current.patches if p.qubit not in moving_qubits]
+            frames = legalise_frames(moves, stationary)
             for frame in frames:
                 schedule.record_move_frame(frame, current)
             current = target_placement
