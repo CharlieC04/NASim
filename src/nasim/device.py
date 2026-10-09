@@ -10,7 +10,7 @@ from nasim.model import Model
 class SLM:
 
     """
-    One SLM trap array (r x c lattice)
+    SLM trap array (r x c lattice)
     """
 
     rows: int
@@ -47,6 +47,7 @@ class Zone:
         return self.slm.sites
 
     def contains(self, pos: Position) -> bool:
+
         x0 = self.slm.origin.x
         x1 = self.slm.origin.x + self.slm.cols * self.slm.pitch_x_um
         y0 = self.slm.origin.y
@@ -55,6 +56,7 @@ class Zone:
         return min(x0, x1) <= pos.x <= max(x0, x1) and min(y0, y1) <= pos.y <= max(y0, y1)
 
 def _slm_bbox(slm: SLM) -> tuple[float, float, float, float]:
+
     x0 = slm.origin.x
     x1 = slm.origin.x + (slm.cols - 1) * slm.pitch_x_um
     y0 = slm.origin.y
@@ -70,7 +72,9 @@ def _slms_overlap(a: SLM, b: SLM) -> bool:
 @dataclass(frozen=True)
 class Device:
     """
-    A 2D grid of trap sites for a given machine model
+    One or more SLM trap-site grids merged into one addressable site set,
+    for a given machine Model. Build with Device.uniform (one grid, no
+    zones) or Device.zoned (separate storage/entanglement grids).
     """
 
     model: Model
@@ -86,7 +90,6 @@ class Device:
         object.__setattr__(self, "sites", tuple(seen.values()))
 
     def site_id(self, row: int, col: int) -> int:
-        """Only meaningful for a single uniform SLM block."""
         return row * self.slms[0].cols + col
 
     @classmethod
@@ -108,6 +111,9 @@ class Device:
     def zoned(cls, model: Model, *, storage_rows: int, storage_cols: int, storage_pitch_um: float,
               entanglement_rows: int, entanglement_cols: int, entanglement_pitch: float, gap_um: float = 10.0):
 
+        """Build a two-zone device: a storage grid with the entanglement
+        grid placed directly above it, separated by gap_um."""
+
         storage = SLM(rows=storage_rows, cols=storage_cols, pitch_x_um=storage_pitch_um, pitch_y_um=storage_pitch_um)
         storage_height = (storage_rows - 1) * storage_pitch_um
         entanglement = SLM(rows=entanglement_rows, cols=entanglement_cols, pitch_x_um=entanglement_pitch, pitch_y_um=entanglement_pitch,
@@ -124,6 +130,7 @@ class Device:
         return cls(model=model, slms=(storage, entanglement), zones=zones)
 
     def zone_of(self, pos: Position) -> Zone | None:
+
         for zone in self.zones:
             if zone.contains(pos):
                 return zone

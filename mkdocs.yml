@@ -1,0 +1,44 @@
+site_name: NASim
+site_description: A simulator for 2D/3D neutral-atom FTQC compilation
+repo_url: https://github.com/CharlieC04/NASim
+
+theme:
+  name: material
+  features: [navigation.sections, content.code.copy]
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+
+markdown_extensions:
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - admonition
+  - tables
+
+extra_javascript:
+  - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Concepts:
+      - Overview & Pipeline: concepts/overview.md
+      - Surface Codes & Lattice Surgery: concepts/lattice-surgery.md
+      - Zoned Architecture: concepts/zoned-architecture.md
+      - Scheduling (ASAP-separate): concepts/scheduling.md
+      - Placement (Piqasso & ZAP): concepts/placement.md
+      - Movement & Routing: concepts/movement.md
+      - Idle-Qubit Management: concepts/idle-management.md
+  - Examples: examples.md
+  - API Reference: api.md
+  - Sources: sources.md
+  - Contributing: contributing.md

@@ -47,6 +47,7 @@ class Model:
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> Model:
+
         data = load_config(path)
 
         geometry = data["geometry"]

@@ -6,6 +6,7 @@ from enum import Enum
 import math
 
 class GateType(Enum):
+
     ONE_QUBIT = "1q"
     TWO_QUBIT = "2q"
 
@@ -33,13 +34,18 @@ class Circuit:
 
     @classmethod
     def from_stages(cls, num_qubits: int, stages: list[list[Gate]]) -> Circuit:
+
+        """Build a Circuit with the given stage boundaries."""
+
         return cls(num_qubits, tuple(tuple(stage) for stage in stages))
 
     @classmethod
     def from_gates(cls, num_qubits: int, gates: list[Gate]) -> Circuit:
 
         """
-        ASAP-separate scheduling (ZAC)
+        ASAP-separate scheduling (ZAP): lay out all 2Q gates first via ASAP
+        over the 2Q-only dependency chain, then bin-pack 1Q gates into the
+        gaps between the resulting checkpoints.
         """
 
         two_qubit_gates = [g for g in gates if g.type is GateType.TWO_QUBIT]
@@ -48,6 +54,8 @@ class Circuit:
         checkpoints: list[list[Gate]] = []
         checkpoint_idx: list[int] = []
 
+
+        # Construct cursors for ASAP algo
         for gate in two_qubit_gates:
             qa, qb = gate.qubits
             s = max(cursor_2q.get(qa, -1), cursor_2q.get(qb, -1)) + 1
@@ -59,6 +67,8 @@ class Circuit:
 
         k = len(checkpoints)
 
+
+        # Construct 1Q buckets
         gap_of_qubit = [0] * num_qubits
         buckets: list[list[Gate]] = [[] for _ in range(k+1)]
         tq_idx = 0

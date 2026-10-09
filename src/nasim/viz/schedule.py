@@ -136,6 +136,7 @@ class ScheduleViewer:
         self._draw()
 
     def _global_bounds(self, margin_um: float = 10.0):
+
         xs, ys = [], []
         for snap in self.snapshots:
             for _, _, pos in snap.atoms():
@@ -232,6 +233,7 @@ class ScheduleViewer:
         self.fig.canvas.draw_idle()
 
     def save_frames(self, out_dir: str, dpi: int = 110) -> list[str]:
+
         import os
 
         os.makedirs(out_dir, exist_ok=True)

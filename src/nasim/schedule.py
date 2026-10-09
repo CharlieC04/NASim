@@ -15,18 +15,22 @@ from nasim.device import Device
 AtomId = tuple[int, tuple[int, int]] # (qubit, local coord)
 
 def _all_atom_ids(placement: Placement) -> list[AtomId]:
+
     return [(p.qubit, atom.local) for p in placement.patches for atom in p.patch.atoms]
 
 def _data_atom_ids(placement: Placement, qubit: int) -> list[AtomId]:
+
     placed = next(p for p in placement.patches if p.qubit == qubit)
     return [(qubit, atom.local) for atom in placed.patch.atoms if atom.role == AtomRole.DATA]
 
 def _patch_atom_ids(placement: Placement, qubit: int) -> list[AtomId]:
+
     placed = next(p for p in placement.patches if p.qubit == qubit)
     return [(qubit, atom.local) for atom in placed.patch.atoms]
 
 @dataclass
 class ScheduleOp:
+
     kind: str
     start_us: float
     duration_us: float
@@ -85,6 +89,10 @@ class Schedule:
         return tuple(bystanders)
 
     def _advance(self, targets: list[AtomId], duration_us: float) -> float:
+
+        """Advance the clock by duration_us, accruing idle time for every
+        live atom not in targets. Returns the start time of this op."""
+
         start_us = self.clock_us
         target_set = set(targets)
         for atom in self.all_atoms:
@@ -95,6 +103,9 @@ class Schedule:
         return start_us
 
     def retarget_atoms(self, remove: set[AtomId], add: set[AtomId]) -> None:
+
+        """Swap which AtomIds are "live", used when a merge/split changes
+        which (qubit, local) pairs actually exist."""
 
         for atom in remove:
             self.all_atoms.discard(atom)
@@ -274,6 +285,8 @@ class Schedule:
 
 def simulate_one_qubit_circuit(circuit: Circuit, placement: Placement, model: Model) -> Schedule:
 
+    """Simulate a circuit with 1Q gates only (no movement, no device) """
+
     schedule = Schedule(model=model, all_atoms=tuple(_all_atom_ids(placement)))
     for stage_idx in range(len(circuit.stages)):
         schedule.record_1q_stage(circuit, stage_idx, placement)
@@ -283,9 +296,7 @@ def simulate_one_qubit_circuit(circuit: Circuit, placement: Placement, model: Mo
 def circuit_fidelity(schedule: Schedule, *, d: int) -> float:
 
     """
-    Estimate circuit fidelity using 
-    F = F1^Ng1 * Fg^Nsp * F2^Ng2 * Fh^Nh * prod_q exp(-t_idle_q / T2*)
-    Crosstalk and transport heating not modelled
+    WIP
     """
 
     model = schedule.model
@@ -318,6 +329,8 @@ _CONFLICT_COST = {
 
 def _cand_anchor(pa: PlacedPatch, edge: Edge, width: float, height: float) -> Position:
 
+    """The anchor a patch would need to sit flush against pa's given edge."""
+
     if edge is Edge.RIGHT:
         return Position(pa.anchor.x + width, pa.anchor.y, pa.anchor.z)
     if edge is Edge.LEFT:
@@ -327,6 +340,7 @@ def _cand_anchor(pa: PlacedPatch, edge: Edge, width: float, height: float) -> Po
     return Position(pa.anchor.x, pa.anchor.y - height, pa.anchor.z)
 
 def _conflict_cost(move: Move, committed: list[Move]) -> float:
+
     return sum(
         _CONFLICT_COST.get(reason[1], 0.0)
         for other in committed
@@ -453,7 +467,10 @@ def _stages_until_next_2q(circuit: Circuit, qubit: int, from_stage_idx: int) -> 
 def _idle_qubit_management(circuit: Circuit, stage_idx: int, placement: Placement, device: Device, model: Model, involved: set[int]):
 
     """
-    ZAC eqs: compare cost of staying in Ez vs returning to Sz
+    ZAP Eq. 12-15: for each entanglement-zone resident not involved in the
+    current stage, compare the cost of staying (crosstalk exposure until
+    its next 2Q use) against returning to storage (round-trip transfer +
+    decoherence) and move it back if staying costs more.
     """
 
     ent_zones = [z for z in device.zones if z.kind == "entanglement"]
@@ -499,6 +516,14 @@ def _idle_qubit_management(circuit: Circuit, stage_idx: int, placement: Placemen
     return working, moves
 
 def simulate_circuit(circuit: Circuit, placement: Placement, model: Model, device: Device | None = None) -> tuple[Schedule, Placement]:
+
+    """
+    Simulate circuit from placement, returning the full Schedule and the
+    final Placement. Per stage: 1Q stages are recorded directly; 2Q stages
+    run idle-qubit management (zoned devices only), route each pair into
+    the entanglement zone, legalise the resulting moves into AOD-safe
+    frames, then execute each 2Q gate as a lattice-surgery merge + split.
+    """
 
     schedule = Schedule(model=model, all_atoms=set(_all_atom_ids(placement)), device=device)
     current = placement

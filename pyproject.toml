@@ -20,6 +20,10 @@ dev = [
 viz = [
     "matplotlib>=3.8"
 ]
+docs = [
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.25"
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/nasim"]

@@ -13,21 +13,28 @@ from nasim.surface_code import Patch
 
 @dataclass(frozen=True)
 class PlacedPatch:
+
+    """One logical qubit's patch, anchored at a physical position. anchor
+    is the patch's local-(0,0) point, not its geometric center."""
+
     qubit: int
     patch: Patch
     anchor: Position
 
 @dataclass(frozen=True)
 class Placement:
+
     model: Model
     patches: tuple[PlacedPatch, ...]
 
     def atoms(self):
+
         for placed in self.patches:
             for atom, pos in placed.patch.embed(placed.anchor, self.model.gate_pair_dist_um):
                 yield placed.qubit, atom, pos
 
     def bounding_box_um(self, placed: PlacedPatch) -> tuple[float, float, float, float]:
+
         unit_um = self.model.gate_pair_dist_um
         min_x, min_y, max_x, max_y = placed.patch.local_bounds
         x0 = placed.anchor.x + min_x * unit_um
@@ -35,10 +42,12 @@ class Placement:
         return x0, y0, (max_x - min_x) * unit_um, (max_y - min_y) * unit_um
 
 def _patch_radius(patch: Patch, unit_um: float) -> float:
+
     min_x, min_y, max_x, max_y = patch.local_bounds
     return 0.5 * unit_um * max(max_x - min_x, max_y - min_y)
 
 def patch_separation_um(model: Model, distance: int) -> float:
+
     patch = Patch.rotated(distance)
     return 2 * _patch_radius(patch, model.gate_pair_dist_um) + model.gate_pair_dist_um
 
