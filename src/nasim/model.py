@@ -45,6 +45,24 @@ class Model:
     # coherence
     t2_s: float
 
+    # magic
+    cultivation_check_success_prob: float
+    cultivation_check_cycles: float
+    cultivation_num_subfactories: int
+    cultivation_escape_success_prob: float
+    cultivation_escape_cycles: float
+    cultivation_teleportation_success_prob: float
+
+    @property
+    def qec_round_duration_us(self) -> float:
+
+        """
+        4 seq CZ + readout
+        """
+
+        return 4 * self.cz_duration_us + self.readout_time_us
+
+
     @classmethod
     def from_yaml(cls, path: str | Path) -> Model:
 
@@ -56,6 +74,7 @@ class Model:
         readout = data["readout"]
         gates = data["gates"]
         coherence = data["coherence"]
+        cultivation = data["cultivation"]
 
         return cls(
             name=data["name"],
@@ -78,5 +97,11 @@ class Model:
             single_qubit_fidelity=gates["single_qubit_fidelity"],
             single_qubit_duration_us=gates["single_qubit_duration_us"],
             carrier_fidelity=gates["carrier_fidelity"],
-            t2_s=coherence["t2_s"]
+            t2_s=coherence["t2_s"],
+            cultivation_check_success_prob=cultivation["check_success_prob"],
+            cultivation_check_cycles=cultivation["check_cycles"],
+            cultivation_num_subfactories=cultivation["num_subfactories"],
+            cultivation_escape_success_prob=cultivation["escape_success_prob"],
+            cultivation_escape_cycles=cultivation["escape_cycles"],
+            cultivation_teleportation_success_prob=cultivation["teleportation_success_prob"]
         )

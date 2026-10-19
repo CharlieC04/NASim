@@ -38,3 +38,35 @@ gates:
 
 coherence:
   t2_s: 12.6
+
+cultivation:
+  # from FT-Weave T1
+  check_success_prob: 0.25
+  check_cycles: 12.5
+  num_subfactories: 1
+  escape_success_prob: 0.66
+  escape_cycles: 0.5
+  teleportation_success_prob: 0.5
+
+architecture:
+  storage_zones:
+    - zone_id: 0
+      num_aods: 1
+      slms:
+        - id: 0
+          rows: 8
+          cols: 8
+          pitch_x_um: 17.5
+          pitch_y_um: 17.5
+          origin_um: [0.0, 0.0]
+
+  entanglement_zones:
+    - zone_id: 0
+      num_aods: 1
+      slms:
+        - id: 1
+          rows: 6
+          cols: 8
+          pitch_x_um: 17.5
+          pitch_y_um: 17.5
+          origin_um: [0.0, 157.5]

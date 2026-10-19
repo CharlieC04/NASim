@@ -1,20 +1,24 @@
 import math
+import random
 from pathlib import Path
 
 import pytest
 
-from nasim.circuit import Circuit, one_qubit, two_qubit
+from nasim.circuit import Circuit, one_qubit, two_qubit, magic_consume
 from nasim.device import Device
 from nasim.geometry import Position
 from nasim.model import Model
 from nasim.move import legalise_frames, moves_between
-from nasim.placement import PlacedPatch, Placement, patch_separation_um, piqasso_placement
+from nasim.placement import PlacedPatch, Placement, patch_separation_um, piqasso_placement, zap_placement
+from nasim.resource import Factory
 from nasim.schedule import (
     Schedule,
     circuit_fidelity,
     simulate_one_qubit_circuit,
     _all_atom_ids,
-    simulate_circuit
+    simulate_circuit,
+    _retarget_adjacent,
+    _match_by_distance,
 )
 from nasim.surface_code import AtomRole, Patch, _ancilla_weight_counts
 
@@ -80,11 +84,11 @@ def test_move_frame_counts_two_handovers_per_atom(model, device):
         )
         for p in before.patches
     ))
-    frames = legalise_frames(moves_between(before, after))
+    rounds = legalise_frames(moves_between(before, after))
 
     schedule = Schedule(model=model, all_atoms=tuple(_all_atom_ids(before)))
-    for frame in frames:
-        schedule.record_move_frame(frame, before)
+    for lanes in rounds:
+        schedule.record_move_round(lanes, before)
 
     assert schedule.Nh == 2 * 17  # one 17-atom patch moved: pick + drop per atom
 
@@ -287,7 +291,7 @@ def test_simulate_circuit_batches_independent_pairs_into_one_move_frame(model):
 
     schedule, final_placement = simulate_circuit(circuit, placement, model)
 
-    move_frame_ops = [op for op in schedule.ops if op.kind == "move_frame"]
+    move_frame_ops = [op for op in schedule.ops if op.kind == "move_round"]
     assert len(move_frame_ops) == 1
     assert sorted(move_frame_ops[0].detail["qubits"]) == [1, 3]
 
@@ -342,7 +346,7 @@ def test_routing_aware_placement_avoids_an_avoidable_conflict(model):
 
     schedule, final_placement = simulate_circuit(circuit, placement, model)
 
-    move_frame_ops = [op for op in schedule.ops if op.kind == "move_frame"]
+    move_frame_ops = [op for op in schedule.ops if op.kind == "move_round"]
     assert len(move_frame_ops) == 2, "q0 sits at the spurious (0,0) tone intersection, so q1/q3 must serialise"
     moved_qubits = sorted(q for op in move_frame_ops for q in op.detail["qubits"])
     assert moved_qubits == [1, 3]
@@ -475,7 +479,7 @@ def test_idle_qubit_never_reused_again_always_returns_to_storage(model, zoned_de
     ent_zone = next(z for z in zoned_device_d3.zones if z.kind == "entanglement")
     storage_zone = next(z for z in zoned_device_d3.zones if z.kind == "storage")
     patch = Patch.rotated(3)
-    origin = ent_zone.slm.origin
+    origin = ent_zone.slms[0].origin
     width = patch_separation_um(model, distance=3)
 
     placement = Placement(model=model, patches=(
@@ -499,7 +503,7 @@ def test_idle_qubit_reused_next_stage_stays_resident(model, zoned_device_d3):
 
     ent_zone = next(z for z in zoned_device_d3.zones if z.kind == "entanglement")
     patch = Patch.rotated(3)
-    origin = ent_zone.slm.origin
+    origin = ent_zone.slms[0].origin
     width = patch_separation_um(model, distance=3)
 
     placement = Placement(model=model, patches=(
@@ -525,7 +529,7 @@ def test_idle_qubit_reused_far_in_the_future_still_returns(model, zoned_device_d
 
     ent_zone = next(z for z in zoned_device_d3.zones if z.kind == "entanglement")
     patch = Patch.rotated(3)
-    origin = ent_zone.slm.origin
+    origin = ent_zone.slms[0].origin
     width = patch_separation_um(model, distance=3)
 
     placement = Placement(model=model, patches=(
@@ -677,3 +681,286 @@ def test_per_round_logical_error_rate_improves_with_code_distance():
         if prev_p_l is not None:
             assert p_l < prev_p_l, f"d={d}: per-round P_L={p_l} did not improve on {prev_p_l}"
         prev_p_l = p_l
+
+
+DISTANCE = 3
+
+
+def _ez_device(model: Model) -> Device:
+    pitch = patch_separation_um(model, distance=DISTANCE)
+    return Device.zoned(
+        model=model,
+        storage_rows=6, storage_cols=6, storage_pitch_um=pitch,
+        entanglement_rows=3, entanglement_cols=5, entanglement_pitch=pitch,
+        gap_um=2 * pitch,
+    )
+
+
+def _big_ez_device(model: Model) -> Device:
+    # Enough Ez capacity for several qubits and several factories to be
+    # concurrently resident (plus routing headroom), for tests exercising
+    # multiple simultaneous magic_consume requests/factories.
+    pitch = patch_separation_um(model, distance=DISTANCE)
+    return Device.zoned(
+        model=model,
+        storage_rows=8, storage_cols=8, storage_pitch_um=pitch,
+        entanglement_rows=6, entanglement_cols=8, entanglement_pitch=pitch,
+        gap_um=2 * pitch,
+    )
+
+
+def _factories(model, ids, *, seed_offset=0, num_subfactories=None):
+    return [
+        Factory(resource_id=i, model=model, rng=random.Random(seed_offset + abs(i)), distance=DISTANCE,
+                num_subfactories=num_subfactories)
+        for i in ids
+    ]
+
+
+def test_magic_consume_executes_and_factory_persists(model):
+    device = _ez_device(model)
+    circuit = Circuit.from_stages(1, [[one_qubit(0)], [magic_consume(0)]])
+    placement = zap_placement(circuit, model, device, distance=DISTANCE)
+    factories = _factories(model, [-1])
+
+    schedule, final = simulate_circuit(circuit, placement, model, device=device, factories=factories)
+
+    assert sorted(p.qubit for p in final.patches) == [-1, 0]
+    assert "split_handover" in {op.kind for op in schedule.ops} or "merge_handover" in {op.kind for op in schedule.ops}
+    # the data qubit and the factory must still be tracked live atoms
+    assert any(atom[0] == 0 for atom in schedule.all_atoms)
+    assert any(atom[0] == -1 for atom in schedule.all_atoms)
+
+
+def test_magic_consume_without_factories_raises(model):
+    device = _ez_device(model)
+    circuit = Circuit.from_stages(1, [[magic_consume(0)]])
+    placement = zap_placement(circuit, model, device, distance=DISTANCE)
+
+    with pytest.raises(ValueError):
+        simulate_circuit(circuit, placement, model, device=device, factories=None)
+
+    with pytest.raises(ValueError):
+        simulate_circuit(circuit, placement, model, device=device, factories=[])
+
+
+def test_magic_consume_without_device_raises(model):
+    circuit = Circuit.from_stages(1, [[magic_consume(0)]])
+    device = _ez_device(model)
+    placement = zap_placement(circuit, model, device, distance=DISTANCE)
+    factories = _factories(model, [-1])
+
+    with pytest.raises(ValueError):
+        simulate_circuit(circuit, placement, model, device=None, factories=factories)
+
+
+def test_magic_consume_cannot_share_a_stage_with_other_gate_types(model):
+    device = _ez_device(model)
+    circuit = Circuit.from_stages(2, [[magic_consume(0), one_qubit(1)]])
+    placement = zap_placement(circuit, model, device, distance=DISTANCE)
+    factories = _factories(model, [-1])
+
+    with pytest.raises(NotImplementedError):
+        simulate_circuit(circuit, placement, model, device=device, factories=factories)
+
+
+def test_magic_consume_waits_for_check_and_escape(model):
+    device = _ez_device(model)
+    circuit = Circuit.from_stages(1, [[one_qubit(0)], [magic_consume(0)]])
+    placement = zap_placement(circuit, model, device, distance=DISTANCE)
+    factories = _factories(model, [-1])
+
+    schedule, _ = simulate_circuit(circuit, placement, model, device=device, factories=factories)
+    waits = [op for op in schedule.ops if op.kind == "await_resource"]
+    # at least one wait for the check stage and one for the escape stage
+    assert len(waits) >= 2
+    assert all(w.duration_us > 0 for w in waits)
+
+
+def test_magic_consume_second_request_needs_a_fresh_check_and_escape(model):
+    # With a single factory, a second magic_consume gate has to wait for
+    # an entirely new check-then-escape cycle (no parallel supply), so it
+    # accrues at least as many waits as the first request.
+    device = _ez_device(model)
+    circuit = Circuit.from_stages(2, [[one_qubit(0), one_qubit(1)], [magic_consume(0)], [magic_consume(1)]])
+    placement = zap_placement(circuit, model, device, distance=DISTANCE)
+    factories = _factories(model, [-1])
+
+    schedule, final = simulate_circuit(circuit, placement, model, device=device, factories=factories)
+    assert sorted(p.qubit for p in final.patches) == [-1, 0, 1]
+    waits = [op for op in schedule.ops if op.kind == "await_resource"]
+    assert len(waits) >= 4
+
+
+def test_magic_consume_is_deterministic_given_seed(model):
+    device = _ez_device(model)
+    circuit = Circuit.from_stages(2, [[one_qubit(0), one_qubit(1)], [magic_consume(0)], [magic_consume(1)]])
+
+    placement_a = zap_placement(circuit, model, device, distance=DISTANCE)
+    schedule_a, _ = simulate_circuit(circuit, placement_a, model, device=device, factories=_factories(model, [-1]))
+
+    placement_b = zap_placement(circuit, model, device, distance=DISTANCE)
+    schedule_b, _ = simulate_circuit(circuit, placement_b, model, device=device, factories=_factories(model, [-1]))
+
+    assert schedule_a.clock_us == schedule_b.clock_us
+
+
+def test_magic_consume_concurrent_requests_use_multiple_factories(model):
+    device = _ez_device(model)
+    circuit = Circuit.from_stages(2, [[one_qubit(0), one_qubit(1)], [magic_consume(0), magic_consume(1)]])
+    placement = zap_placement(circuit, model, device, distance=DISTANCE)
+    factories = _factories(model, [-1, -2])
+
+    schedule, final = simulate_circuit(circuit, placement, model, device=device, factories=factories)
+    assert sorted(p.qubit for p in final.patches) == [-2, -1, 0, 1]
+
+
+def test_magic_consume_more_factories_never_increases_clock(model):
+    # Also exercises _retarget_adjacent's relocation fallback: zap_placement
+    # clusters qubits tightly near the Ez corner, so with only 1 factory
+    # serving 3 sequential requests, later ones can find every immediate
+    # neighbour of its site occupied - it must relocate to a fresh free
+    # site and retry the touch there rather than failing.
+    device = _big_ez_device(model)
+    circuit = Circuit.from_stages(3, [
+        [one_qubit(0), one_qubit(1), one_qubit(2)],
+        [magic_consume(0), magic_consume(1), magic_consume(2)],
+    ])
+
+    placement_one = zap_placement(circuit, model, device, distance=DISTANCE)
+    schedule_one, _ = simulate_circuit(circuit, placement_one, model, device=device, factories=_factories(model, [-1]))
+
+    placement_three = zap_placement(circuit, model, device, distance=DISTANCE)
+    schedule_three, _ = simulate_circuit(circuit, placement_three, model, device=device, factories=_factories(model, [-1, -2, -3]))
+
+    assert schedule_three.clock_us <= schedule_one.clock_us
+
+
+def test_factory_with_more_subfactories_never_increases_clock(model):
+    # More parallel check-stage lines per factory should only help: the
+    # effective per-restart success probability is 1-(1-p)^k.
+    device = _big_ez_device(model)
+    circuit = Circuit.from_stages(3, [
+        [one_qubit(0), one_qubit(1), one_qubit(2)],
+        [magic_consume(0), magic_consume(1), magic_consume(2)],
+    ])
+
+    placement_k1 = zap_placement(circuit, model, device, distance=DISTANCE)
+    schedule_k1, _ = simulate_circuit(circuit, placement_k1, model, device=device,
+                                      factories=_factories(model, [-1], num_subfactories=1))
+
+    placement_k3 = zap_placement(circuit, model, device, distance=DISTANCE)
+    schedule_k3, _ = simulate_circuit(circuit, placement_k3, model, device=device,
+                                      factories=_factories(model, [-1], num_subfactories=3))
+
+    assert schedule_k3.clock_us <= schedule_k1.clock_us
+
+
+def test_match_by_distance_minimizes_total_movement_distance(model):
+    # Four distinct, known Ez sites such that the "swap" pairing costs
+    # less in total distance than the "in-order" pairing. The real
+    # minimum-cost assignment must pick the cheaper one regardless of
+    # request/factory list order - this is the exact primitive both
+    # check->escape redistribution and escape->qubit delivery use.
+    device = _ez_device(model)
+    ent_zone = next(z for z in device.zones if z.kind == "entanglement")
+    patch = Patch.rotated(DISTANCE)
+    unit_um = model.gate_pair_dist_um
+
+    def anchor(site):
+        min_x, min_y, _, _ = patch.local_bounds
+        return Position(site.x - min_x * unit_um, site.y - min_y * unit_um, site.z)
+
+    sites = sorted(ent_zone.sites, key=lambda s: (s.x, s.y))
+    assert len(sites) >= 4
+    q0_site, f1_site, f2_site, q1_site = sites[0], sites[1], sites[2], sites[3]
+
+    def dist(a, b):
+        return math.hypot(a.x - b.x, a.y - b.y)
+
+    cost_in_order = dist(q0_site, f1_site) + dist(q1_site, f2_site)
+    cost_swapped = dist(q0_site, f2_site) + dist(q1_site, f1_site)
+    assert cost_swapped != cost_in_order, "test sites must make the two pairings' costs distinguishable"
+
+    placement = Placement(model=model, patches=(
+        PlacedPatch(qubit=0, patch=patch, anchor=anchor(q0_site)),
+        PlacedPatch(qubit=1, patch=patch, anchor=anchor(q1_site)),
+        PlacedPatch(qubit=-1, patch=patch, anchor=anchor(f1_site)),
+        PlacedPatch(qubit=-2, patch=patch, anchor=anchor(f2_site)),
+    ))
+
+    actual_pairs = set(_match_by_distance(placement, [-1, -2], [0, 1]))
+
+    if cost_swapped < cost_in_order:
+        expected_pairs = {(-1, 1), (-2, 0)}
+    else:
+        expected_pairs = {(-1, 0), (-2, 1)}
+    assert actual_pairs == expected_pairs, (
+        f"assignment picked {actual_pairs}, but the minimum-cost pairing is {expected_pairs} "
+        f"(in-order cost={cost_in_order:.2f}, swapped cost={cost_swapped:.2f})"
+    )
+
+def test_retarget_adjacent_relocates_when_both_patches_are_fully_boxed_in(model):
+    # Box qa in on all 4 sides AND qb in on all 4 sides (8 distinct
+    # blockers), so every direct touching-edge candidate for both
+    # directions is occupied - the only way to succeed is to relocate
+    # one of the two patches to a fresh free site elsewhere in the zone
+    # and retry the touch from there.
+    device = _big_ez_device(model)
+    ent_zone = next(z for z in device.zones if z.kind == "entanglement")
+    patch = Patch.rotated(DISTANCE)
+    unit_um = model.gate_pair_dist_um
+    min_x, min_y, max_x, max_y = patch.local_bounds
+    width = (max_x - min_x) * unit_um
+    height = (max_y - min_y) * unit_um
+
+    def anchor(site):
+        return Position(site.x - min_x * unit_um, site.y - min_y * unit_um, site.z)
+
+    sites = sorted(ent_zone.sites, key=lambda s: (s.x, s.y))
+    # Pick two well-separated sites within the zone for qa and qb so their
+    # own boxing-in blockers don't overlap with each other.
+    qa_site = sites[len(sites) // 4]
+    qb_site = sites[3 * len(sites) // 4]
+
+    def box_blockers(center_site, start_id):
+        cx, cy = center_site.x, center_site.y
+        offsets = [(width, 0.0), (-width, 0.0), (0.0, height), (0.0, -height)]
+        blockers = []
+        for i, (dx, dy) in enumerate(offsets):
+            blockers.append(PlacedPatch(
+                qubit=start_id + i, patch=patch,
+                anchor=Position(cx + dx, cy + dy, 0.0),
+            ))
+        return blockers
+
+    qa_anchor = anchor(qa_site)
+    qb_anchor = anchor(qb_site)
+    qa_blockers = box_blockers(qa_anchor, start_id=100)
+    qb_blockers = box_blockers(qb_anchor, start_id=200)
+
+    placement = Placement(model=model, patches=(
+        PlacedPatch(qubit=0, patch=patch, anchor=qa_anchor),
+        PlacedPatch(qubit=1, patch=patch, anchor=qb_anchor),
+        *qa_blockers,
+        *qb_blockers,
+    ))
+
+    # Sanity check: without the zone fallback, this must fail (confirms
+    # the test actually boxes both patches in, rather than trivially
+    # succeeding via the ordinary symmetric search).
+    with pytest.raises(ValueError):
+        _retarget_adjacent(placement, 0, 1, [], site_filter=ent_zone.contains)
+
+    new_placement, moves = _retarget_adjacent(placement, 0, 1, [], site_filter=ent_zone.contains, zone=ent_zone)
+    assert len(moves) == 2, "expected a relocation move plus a touch move"
+
+    moved_qubits = {m.qubit for m in moves}
+    assert moved_qubits == {0, 1}
+
+    p0 = next(p for p in new_placement.patches if p.qubit == 0)
+    p1 = next(p for p in new_placement.patches if p.qubit == 1)
+    # The two must actually end up adjacent (touching) after relocation.
+    dx = abs(p0.anchor.x - p1.anchor.x)
+    dy = abs(p0.anchor.y - p1.anchor.y)
+    assert (math.isclose(dx, width) and math.isclose(dy, 0.0)) or (math.isclose(dy, height) and math.isclose(dx, 0.0))
