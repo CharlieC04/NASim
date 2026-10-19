@@ -4,7 +4,7 @@ import math
 
 from nasim.device import Device
 from nasim.geometry import Position
-from nasim.move import Move, conflict_reason
+from nasim.move import Move, conflict_reason, legalise_frames
 from nasim.placement import Placement, PlacedPatch
 from nasim.surface_code import Patch, Edge
 
@@ -196,3 +196,33 @@ def _retarget_pair_into_entanglement_zone(placement: Placement, device: Device, 
     moves.extend(moves_b)
 
     return working, moves
+
+def _legalise_by_zone(moves: list[Move], stationary: list[Position], device: Device | None) -> list[list[list[Move]]]:
+
+    """
+    Partition moves by zone bound for and legalise zone's moves indep.
+    """
+
+    if device is None or not device.zones:
+        return legalise_frames(moves, stationary, num_aods=1)
+
+    def zone_for(move: Move):
+        return device.zone_of(move.target) or device.zone_of(move.source)
+
+    groups: dict[str, tuple[int, list[Move]]] = {}
+    order: list[str] = []
+    for move in moves:
+        zone = zone_for(move)
+        key = zone.name if zone is not None else "__unzoned__"
+        num_aods = zone.num_aods if zone is not None else 1
+        if key not in groups:
+            groups[key] = (num_aods, [])
+            order.append(key)
+        groups[key][1].append(move)
+
+    rounds: list[list[list[Move]]] = []
+    for key in order:
+        num_aods, group_moves = groups[key]
+        rounds.extend(legalise_frames(group_moves, stationary, num_aods=num_aods))
+
+    return rounds

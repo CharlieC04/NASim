@@ -130,15 +130,16 @@ class Schedule:
             targets=tuple(targets), detail={"stage": stage_idx, "qubits": [g.qubits[0] for g in stage]}
         ))
 
-    def record_move_frame(self, frame: list[Move], placement_before: Placement) -> None:
+    def record_move_round(self, lanes: list[list[Move]], placement_before: Placement) -> None:
 
-        if not frame: return
-        transit = max(move_duration_us(m, self.model) for m in frame)
+        all_moves = [m for lane in lanes for m in lane]
+        if not all_moves: return
+        transit = max(move_duration_us(m, self.model) for m in all_moves)
         handover = self.model.handover_time_us
         duration = 2 * handover + transit
 
         targets: list[AtomId] = []
-        for move in frame:
+        for move in all_moves:
             atoms = _patch_atom_ids(placement_before, move.qubit)
             targets.extend(atoms)
             self.Nh += 2 * len(atoms)
@@ -146,8 +147,8 @@ class Schedule:
         start_us = self._advance(targets, duration)
 
         self.ops.append(ScheduleOp(
-            kind="move_frame", start_us=start_us, duration_us=duration,
-            targets=tuple(targets), detail={"qubits": [m.qubit for m in frame], "moves": tuple(frame)}
+            kind="move_round", start_us=start_us, duration_us=duration,
+            targets=tuple(targets), detail={"qubits": [m.qubit for m in all_moves], "lanes": tuple(tuple(lane) for lane in lanes)}
         ))
 
     def _record_syndrome_round(self, merged_patch: Patch, targets: list[AtomId], bystanders: tuple[AtomId, ...] = ()):

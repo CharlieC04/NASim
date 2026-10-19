@@ -18,6 +18,7 @@ from nasim.schedule.routing import (
     _site_anchor,
     _nearest_free_zone_site,
     _retarget_pair_into_entanglement_zone,
+    _legalise_by_zone
 )
 from nasim.schedule.idle import (
     _stages_until_next_2q,

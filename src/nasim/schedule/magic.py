@@ -10,7 +10,7 @@ from nasim.move import Move, legalise_frames, moves_between
 from nasim.placement import Placement, PlacedPatch
 from nasim.resource import Factory
 from nasim.schedule.core import Schedule, ScheduleOp, _data_atom_ids
-from nasim.schedule.routing import _nearest_free_zone_site, _retarget_pair_into_entanglement_zone
+from nasim.schedule.routing import _nearest_free_zone_site, _retarget_pair_into_entanglement_zone, _legalise_by_zone
 from nasim.surface_code import Patch
 
 def _ensure_placed(current: Placement, zone, resource_id: int, distance: int, reference_anchor) -> Placement:
@@ -43,9 +43,9 @@ def _teleport_consume(current: Placement, device: Device, schedule: Schedule, qu
         realised = moves_between(current, working)
         moving_qubits = {m.qubit for m in realised}
         stationary = [p.anchor for p in current.patches if p.qubit not in moving_qubits]
-        frames = legalise_frames(realised, stationary)
-        for frame in frames:
-            schedule.record_move_frame(frame, current)
+        rounds = _legalise_by_zone(realised, stationary, device)
+        for lanes in rounds:
+            schedule.record_move_round(lanes, current)
 
     pa = next(p for p in working.patches if p.qubit == qubit_a)
     pb = next(p for p in working.patches if p.qubit == qubit_b)
@@ -54,7 +54,7 @@ def _teleport_consume(current: Placement, device: Device, schedule: Schedule, qu
 
     return working
 
-def _return_to_zone(current: Placement, schedule: Schedule, zone, resource_id: int) -> Placement:
+def _return_to_zone(current: Placement, device: Device, schedule: Schedule, zone, resource_id: int) -> Placement:
 
     """
     Return factory to nearest free zone site after delivery
@@ -71,9 +71,9 @@ def _return_to_zone(current: Placement, schedule: Schedule, zone, resource_id: i
 
     move = Move(qubit=resource_id, source=p.anchor, target=site, clearance_um=radius)
     stationary = [pp.anchor for pp in current.patches if pp.qubit != resource_id]
-    frames = legalise_frames([move], stationary)
-    for frame in frames:
-        schedule.record_move_frame(frame, current)
+    rounds = _legalise_by_zone([move], stationary, device)
+    for lanes in rounds:
+        schedule.record_move_round(lanes, current)
 
     return Placement(
         model=current.model, patches=tuple(PlacedPatch(
@@ -138,7 +138,7 @@ def _resolve_magic_requests(current: Placement, device: Device, schedule: Schedu
 
         for fid, q in _match_by_distance(current, wait_for_rus_ids, remaining):
             current = _teleport_consume(current, device, schedule, fid, q)
-            current = _return_to_zone(current, schedule, ent_zone, fid)
+            current = _return_to_zone(current, device, schedule, ent_zone, fid)
             wait_for_rus_ids.remove(fid)
             remaining.remove(q)
 
