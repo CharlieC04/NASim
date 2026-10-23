@@ -13,6 +13,14 @@ from nasim.placement import patch_separation_um, piqasso_placement
 PRESET = Path(__file__).resolve().parents[1] / "src" / "nasim" / "config" / "presets" / "2d.yaml"
 
 
+def _flatten(rounds):
+    """legalise_frames now returns rounds of lanes (list[list[list[Move]]]).
+    With the default num_aods=1, every round has exactly one lane, so
+    flattening recovers the old flat per-frame move list these tests
+    were written against."""
+    return [lane for round_lanes in rounds for lane in round_lanes]
+
+
 @pytest.fixture
 def model() -> Model:
     return Model.from_yaml(PRESET)
@@ -71,7 +79,7 @@ def test_legalize_frames_separates_a_genuine_conflict():
         Move(1, Position(5, 0, 0), Position(2, 0, 0)),  # crosses move 0
         Move(2, Position(0, 10, 0), Position(0, 20, 0)),  # independent
     ]
-    frames = legalise_frames(moves)
+    frames = _flatten(legalise_frames(moves))
     frame_of = {m.qubit: i for i, frame in enumerate(frames) for m in frame}
     assert frame_of[0] != frame_of[1]
     for frame in frames:
@@ -87,7 +95,7 @@ def test_legalize_frames_every_move_scheduled_exactly_once():
         Move(2, Position(0, 10, 0), Position(0, 20, 0)),
         Move(3, Position(-5, -5, 0), Position(5, 5, 0)),
     ]
-    frames = legalise_frames(moves)
+    frames = _flatten(legalise_frames(moves))
     all_qubits = [m.qubit for frame in frames for m in frame]
     assert sorted(all_qubits) == [0, 1, 2, 3]
 
@@ -98,7 +106,7 @@ def test_independent_moves_in_separate_regions_share_one_frame():
         Move(1, Position(0, 100, 0), Position(10, 100, 0), clearance_um=2.0),
         Move(2, Position(100, 0, 0), Position(110, 0, 0), clearance_um=2.0),
     ]
-    frames = legalise_frames(moves)
+    frames = _flatten(legalise_frames(moves))
     assert len(frames) == 1
 
 
@@ -140,7 +148,7 @@ def test_legalize_frames_resolves_a_chain_by_ordering_frames():
         Move(0, a, b),  # q0 moves onto q1's current site
         Move(1, b, c),  # q1 moves onto an empty site
     ]
-    frames = legalise_frames(moves)
+    frames = _flatten(legalise_frames(moves))
     frame_of = {m.qubit: i for i, frame in enumerate(frames) for m in frame}
     assert frame_of[1] < frame_of[0]  # q1 must vacate before q0 can land on b
 
@@ -149,7 +157,7 @@ def test_shared_start_row_gets_parked_into_one_batch():
     b = Move(qubit=1, source=Position(50, 0), target=Position(50, -50))
     assert not compatible_2d(a, b)
 
-    frames = legalise_frames([a, b])
+    frames = _flatten(legalise_frames([a, b]))
 
     assert len(frames) == 2
     park_frame, main_frame = frames
@@ -163,7 +171,7 @@ def test_parking_clears_clearance_margin():
     a = Move(qubit=0, source=Position(0, 0), target=Position(0, 100), clearance_um=clearance)
     b = Move(qubit=1, source=Position(80, 0), target=Position(80, -100), clearance_um=clearance)
 
-    frames = legalise_frames([a, b])
+    frames = _flatten(legalise_frames([a, b]))
     park = frames[0][0]
     other = b if park.qubit == a.qubit else a
     d = math.hypot(park.target.x - other.source.x, park.target.y - other.source.y)
@@ -175,7 +183,7 @@ def test_genuine_crossing_still_serialises():
     b = Move(qubit=1, source=Position(100, 10), target=Position(0, 10))
     assert not compatible_2d(a, b)
 
-    frames = legalise_frames([a, b])
+    frames = _flatten(legalise_frames([a, b]))
 
     assert len(frames) == 2
     assert all(len(f) == 1 for f in frames)
@@ -186,7 +194,7 @@ def test_independent_moves_unaffected():
     b = Move(qubit=1, source=Position(200, 0), target=Position(200, 10))
     c = Move(qubit=2, source=Position(400, 0), target=Position(400, 10))
 
-    frames = legalise_frames([a, b, c])
+    frames = _flatten(legalise_frames([a, b, c]))
 
     assert len(frames) == 1
     assert len(frames[0]) == 3
@@ -200,7 +208,7 @@ def test_pairwise_compatible_moves_still_batch_with_no_stationary_bystander():
     b = Move(qubit=1, source=Position(50, 200), target=Position(50, 300))
     assert compatible_2d(a, b)
 
-    frames = legalise_frames([a, b])
+    frames = _flatten(legalise_frames([a, b]))
     assert len(frames) == 1
     assert len(frames[0]) == 2
 
@@ -216,7 +224,7 @@ def test_stationary_bystander_at_a_tone_intersection_forces_a_split():
     b = Move(qubit=1, source=Position(50, 200), target=Position(50, 300))
     bystander = Position(0, 200)
 
-    frames = legalise_frames([a, b], stationary=[bystander])
+    frames = _flatten(legalise_frames([a, b], stationary=[bystander]))
 
     frame_of = {m.qubit: i for i, frame in enumerate(frames) for m in frame}
     assert frame_of[0] != frame_of[1]
@@ -227,7 +235,7 @@ def test_stationary_bystander_off_the_tone_grid_does_not_affect_batching():
     b = Move(qubit=1, source=Position(50, 200), target=Position(50, 300))
     far_away = Position(9000, 9000)
 
-    frames = legalise_frames([a, b], stationary=[far_away])
+    frames = _flatten(legalise_frames([a, b], stationary=[far_away]))
     assert len(frames) == 1
     assert len(frames[0]) == 2
 
@@ -240,6 +248,59 @@ def test_stationary_bystander_at_an_intended_source_is_not_a_false_positive():
     a = Move(qubit=0, source=Position(0, 0), target=Position(0, 100))
     b = Move(qubit=1, source=Position(50, 200), target=Position(50, 300))
 
-    frames = legalise_frames([a, b], stationary=[Position(0, 0)])
+    frames = _flatten(legalise_frames([a, b], stationary=[Position(0, 0)]))
     assert len(frames) == 1
     assert len(frames[0]) == 2
+
+def test_num_aods_one_serialises_tone_incompatible_moves_into_two_rounds():
+    # A genuine crossing (unlike shared_source/shared_target, this can't
+    # be resolved by parking) - mirrors test_genuine_crossing_still_serialises.
+    a = Move(qubit=0, source=Position(0, 0), target=Position(100, 0))
+    b = Move(qubit=1, source=Position(100, 10), target=Position(0, 10))
+    assert not compatible_2d(a, b)
+
+    rounds = legalise_frames([a, b], num_aods=1)
+    assert len(rounds) == 2
+    assert all(len(r) == 1 and len(r[0]) == 1 for r in rounds)
+
+
+def test_num_aods_two_puts_tone_incompatible_moves_in_the_same_round_different_lanes():
+    a = Move(qubit=0, source=Position(0, 0), target=Position(100, 0))
+    b = Move(qubit=1, source=Position(100, 10), target=Position(0, 10))
+    assert not compatible_2d(a, b)  # genuine crossing - can't share a lane
+
+    rounds = legalise_frames([a, b], num_aods=2)
+    assert len(rounds) == 1, "both moves should resolve in one round given a second AOD"
+    assert len(rounds[0]) == 2, "expected two separate lanes"
+    assert {lane[0].qubit for lane in rounds[0]} == {0, 1}
+
+
+def test_num_aods_two_still_serialises_geometrically_incompatible_moves():
+    # Tone-compatible (independent rows/columns) but too close together to
+    # move concurrently on ANY two independent AODs - geometric clearance
+    # is a physical constraint, not an AOD-tone one, so it must still
+    # force two separate rounds even with a second AOD available.
+    a = Move(0, Position(0, 0, 0), Position(0, 10, 0), clearance_um=10.0)
+    b = Move(1, Position(3, 0, 0), Position(3, 10, 0), clearance_um=10.0)
+    assert compatible_2d(a, b) is False  # geometric clearance violation, no tone conflict
+
+    rounds = legalise_frames([a, b], num_aods=2)
+    assert len(rounds) == 2
+    assert all(len(r) == 1 and len(r[0]) == 1 for r in rounds)
+
+
+def test_num_aods_three_lanes_cap_at_num_aods_not_move_count():
+    moves = [
+        Move(0, Position(0, 0), Position(0, 100)),
+        Move(1, Position(50, 0), Position(50, -100)),
+        Move(2, Position(100, 0), Position(100, 100)),
+        Move(3, Position(150, 0), Position(150, -100)),
+    ]
+    # 0&1 share a y-tone, 2&3 share a y-tone - two mutually-incompatible
+    # pairs, so at most 2 independent lanes' worth of moves can ever run
+    # concurrently regardless of how many AODs are offered.
+    rounds = legalise_frames(moves, num_aods=3)
+    lanes_per_round = [len(r) for r in rounds]
+    assert max(lanes_per_round) <= 3
+    all_qubits = [m.qubit for r in rounds for lane in r for m in lane]
+    assert sorted(all_qubits) == [0, 1, 2, 3]

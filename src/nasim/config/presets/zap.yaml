@@ -1,0 +1,71 @@
+name: zap_default
+description: >
+  Architecture matching ZAP architecture/default.json
+dimensions: 2D
+
+geometry:
+  layers: 1
+  layer_spacing_um: 0.0
+  sites:
+    grid: null
+  gate_pair_dist_um: 2.5
+
+interaction:
+  blockade_radius_um: 5.0
+
+transport:
+  v_xy_um_per_us: 0.55
+  v_loss_um_per_us: 1.0
+  handover_time_us: 15.0
+  handover_fidelity: 0.999
+  move_profile: min_jerk
+
+addressing:
+  trap_beam_waist_um: [0.8,1.2]
+  local_1q_beam_waist_um: [1.0,1.5]
+  global_drive_beam_waist_um: ">=100"
+
+readout:
+  fidelity: 0.998
+  time_us: 500.0
+
+gates:
+  cz_fidelity: 0.995
+  cz_duration_us: 0.36
+  single_qubit_fidelity: 0.9997
+  single_qubit_duration_us: 52.0
+  carrier_fidelity: 0.9997
+
+coherence:
+  t2_s: 1.5
+
+cultivation:
+  check_success_prob: 0.25
+  check_cycles: 12.5
+  num_subfactories: 1
+  escape_success_prob: 0.66
+  escape_cycles: 0.5
+  teleportation_success_prob: 0.5
+
+architecture:
+  storage_zones:
+    - zone_id: 0
+      num_aods: 1
+      slms:
+        - id: 0
+          rows: 8
+          cols: 10
+          pitch_x_um: 6.0
+          pitch_y_um: 6.0
+          origin_um: [0.0, 0.0]
+
+  entanglement_zones:
+    - zone_id: 0
+      num_aods: 1
+      slms:
+        - id: 1
+          rows: 8
+          cols: 10
+          pitch_x_um: 12.0
+          pitch_y_um: 6.0
+          origin_um: [-22.0, 52.0]

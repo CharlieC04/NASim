@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 import math
 
+from nasim.config.loader import load_config
 from nasim.geometry import Position
 from nasim.model import Model
 
@@ -31,30 +33,6 @@ class SLM:
             for col in range(self.cols)
         )
 
-@dataclass(frozen=True)
-class Zone:
-
-    """
-    Each zone has ONE SLM for now
-    """
-
-    name: str
-    kind: str
-    slm: SLM
-
-    @property
-    def sites(self) -> tuple[Position, ...]:
-        return self.slm.sites
-
-    def contains(self, pos: Position) -> bool:
-
-        x0 = self.slm.origin.x
-        x1 = self.slm.origin.x + self.slm.cols * self.slm.pitch_x_um
-        y0 = self.slm.origin.y
-        y1 = self.slm.origin.y + self.slm.rows * self.slm.pitch_y_um
-
-        return min(x0, x1) <= pos.x <= max(x0, x1) and min(y0, y1) <= pos.y <= max(y0, y1)
-
 def _slm_bbox(slm: SLM) -> tuple[float, float, float, float]:
 
     x0 = slm.origin.x
@@ -64,10 +42,47 @@ def _slm_bbox(slm: SLM) -> tuple[float, float, float, float]:
 
     return min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
 
+def _slm_padded_bbox(slm: SLM) -> tuple[float, float, float, float]:
+
+    x0 = slm.origin.x
+    x1 = slm.origin.x + slm.cols * slm.pitch_x_um
+    y0 = slm.origin.y
+    y1 = slm.origin.y + slm.rows * slm.pitch_y_um
+
+    return min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
+
 def _slms_overlap(a: SLM, b: SLM) -> bool:
     ax0, ay0, ax1, ay1 = _slm_bbox(a)
     bx0, by0, bx1, by1 = _slm_bbox(b)
     return ax0 <= bx1 and bx0 <= ax1 and ay0 <= by1 and by0 <= ay1
+
+@dataclass(frozen=True)
+class Zone:
+
+    """
+    Each zone has ONE SLM for now
+    """
+
+    name: str
+    kind: str
+    slms: tuple[SLM, ...]
+    num_aods: int = 1
+
+    @property
+    def sites(self) -> tuple[Position, ...]:
+        seen: dict[tuple[float, float, float], Position] = {}
+        for slm in self.slms:
+            for s in slm.sites:
+                seen[(s.x, s.y, s.z)] = s
+
+        return tuple(seen.values())
+
+    def contains(self, pos: Position) -> bool:
+
+        for slm in self.slms:
+            x0, y0, x1, y1 = _slm_padded_bbox(slm)
+            if x0 <= pos.x <= x1 and y0 <= pos.y <= y1: return True
+        return False
 
 @dataclass(frozen=True)
 class Device:
@@ -109,7 +124,8 @@ class Device:
 
     @classmethod
     def zoned(cls, model: Model, *, storage_rows: int, storage_cols: int, storage_pitch_um: float,
-              entanglement_rows: int, entanglement_cols: int, entanglement_pitch: float, gap_um: float = 10.0):
+              entanglement_rows: int, entanglement_cols: int, entanglement_pitch: float, gap_um: float = 10.0,
+              storage_num_aods: int = 1, entanglement_num_aods: int = 1):
 
         """Build a two-zone device: a storage grid with the entanglement
         grid placed directly above it, separated by gap_um."""
@@ -123,11 +139,46 @@ class Device:
             raise ValueError("Zones overlap")
 
         zones = (
-            Zone(name="storage", kind="storage", slm=storage),
-            Zone(name="entanglement", kind="entanglement", slm=entanglement)
+            Zone(name="storage", kind="storage", slms=(storage,), num_aods=storage_num_aods),
+            Zone(name="entanglement", kind="entanglement", slms=(entanglement,), num_aods=entanglement_num_aods)
         )
 
         return cls(model=model, slms=(storage, entanglement), zones=zones)
+
+    @classmethod
+    def from_yaml(cls, path: str | Path, model: Model) -> Device:
+
+        data = load_config(path)
+        architecture = data.get("architecture")
+        if architecture is None:
+            raise ValueError("Config missing arch section")
+
+        def build_zone(kind: str, zone_cfg: dict) -> Zone:
+            slms = tuple(
+                SLM(
+                    rows=slm_cfg["rows"], cols=slm_cfg["cols"],
+                    pitch_x_um=slm_cfg["pitch_x_um"], pitch_y_um=slm_cfg["pitch_y_um"],
+                    origin=Position(slm_cfg["origin_um"][0], slm_cfg["origin_um"][1], 0.0)
+                )
+                for slm_cfg in zone_cfg["slms"]
+            )
+            name = f"{kind}_{zone_cfg["zone_id"]}"
+
+            return Zone(name=name, kind=kind, slms=slms, num_aods=zone_cfg.get("num_aods", 1))
+
+        zones = tuple(
+            build_zone(kind, zone_cfg)
+            for kind, key in (("storage", "storage_zones"), ("entanglement", "entanglement_zones"))
+            for zone_cfg in architecture.get(key, [])
+        )
+
+        all_slms = tuple(slm for zone in zones for slm in zone.slms)
+        for i in range(len(all_slms)):
+            for j in range(i + 1, len(all_slms)):
+                if _slms_overlap(all_slms[i], all_slms[j]):
+                    raise ValueError("SLMs overlap")
+
+        return cls(model=model, slms=all_slms, zones=zones)
 
     def zone_of(self, pos: Position) -> Zone | None:
 
