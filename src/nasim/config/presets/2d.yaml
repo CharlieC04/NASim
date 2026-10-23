@@ -45,8 +45,13 @@ cultivation:
   check_cycles: 12.5
   num_subfactories: 1
   escape_success_prob: 0.66
-  escape_cycles: 0.5
+  escape_cycles_by_distance:
+    7: 0.5
+    9: 0.5
+    13: 6.0
+    15: 6.0
   teleportation_success_prob: 0.5
+  t_state_infidelity_target: 1.0e-8
 
 architecture:
   storage_zones:

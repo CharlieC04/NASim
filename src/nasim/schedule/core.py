@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 
 from nasim.circuit import Circuit, GateType
@@ -10,7 +9,11 @@ from nasim.placement import Placement
 from nasim.geometry import Position
 from nasim.surface_code import AtomRole, Patch, _ancilla_weight_counts
 from nasim.lattice_surgery import merge_patches
+from nasim.logical_error_model import logical_fidelity
 from nasim.device import Device
+
+# scaling factor to represent improved physical op fidelities on future FTQC devices
+PROJ_FACTOR = 10.0
 
 AtomId = tuple[int, tuple[int, int]]
 
@@ -59,6 +62,8 @@ class Schedule:
     Nh: int = 0
     Nmeas: int = 0
     Nxtalk: int = 0
+    Ncnot: int = 0
+    Nt: int = 0
 
     idle_us: dict[AtomId, float] = field(default_factory=dict)
 
@@ -184,6 +189,9 @@ class Schedule:
         Perform surgery merge, asm bridge loaded from reserviour
         """
 
+        if qubit_a >= 0 and qubit_b >= 0: self.Ncnot += 1
+        else: self.Nt += 1
+
         unit_um = self.model.gate_pair_dist_um
         pa = next(p for p in placement.patches if p.qubit == qubit_a)
         pb = next(p for p in placement.patches if p.qubit == qubit_b)
@@ -276,25 +284,29 @@ def simulate_one_qubit_circuit(circuit: Circuit, placement: Placement, model: Mo
 def circuit_fidelity(schedule: Schedule, *, d: int) -> float:
 
     """
-    WIP
+    Based on FT-Weave logical error model
     """
 
     model = schedule.model
-    f = model.single_qubit_fidelity ** schedule.Ng1
-    f *= model.carrier_fidelity ** schedule.Nsp
-    f *= model.handover_fidelity ** schedule.Nh
+    p_ph = (1.0 - model.cz_fidelity) / PROJ_FACTOR
+
+    f = model.handover_fidelity ** schedule.Nh
     f *= model.carrier_fidelity ** schedule.Nxtalk
 
-    t2_us = model.t2_s * 1e6
-    for t_idle in schedule.idle_us.values():
-        f *= math.exp(-t_idle / t2_us)
+    f *= logical_fidelity("CNOT", p_ph, d) ** schedule.Ncnot
+    f *= (1.0 - model.cultivation_t_state_infidelity_target) ** schedule.Nt
 
-    num_rounds = sum(1 for op in schedule.ops if op.kind == "mid_circuit_measure")
-    if num_rounds:
-        d_e = (d + 1) // 2 if d % 2 == 1 else d // 2
-        p = 1.0 - model.cz_fidelity
-        p_th = 0.0057 # fowler paper
-        pl_per_round = min(1.0, 0.03 * (p / p_th) ** d_e)
-        f *= (1.0 - pl_per_round) ** num_rounds
+    n_1q = sum(len(op.detail["qubits"]) for op in schedule.ops if op.kind == "1q_stage")
+    f *= logical_fidelity("H", p_ph, d) ** n_1q
+
+    n_s = sum(1 for op in schedule.ops if op.kind == "correction_gate")
+    f *= logical_fidelity("S", p_ph, d) ** n_s
+
+    qec_us = model.qec_round_duration_us
+    per_qubit_idle_us: dict[int, float] = {}
+    for (qubit, _local), t in schedule.idle_us.items():
+        per_qubit_idle_us[qubit] = max(per_qubit_idle_us.get(qubit, 0.0), t)
+    n_idle_rounds = sum(t / qec_us for t in per_qubit_idle_us.values())
+    f *= logical_fidelity("I", p_ph, d) ** n_idle_rounds
 
     return f

@@ -7,6 +7,7 @@ import pytest
 from nasim.circuit import Circuit, one_qubit, two_qubit, magic_consume
 from nasim.device import Device
 from nasim.geometry import Position
+from nasim.logical_error_model import logical_error_rate, logical_fidelity
 from nasim.model import Model
 from nasim.move import legalise_frames, moves_between
 from nasim.placement import PlacedPatch, Placement, patch_separation_um, piqasso_placement, zap_placement
@@ -94,17 +95,34 @@ def test_move_frame_counts_two_handovers_per_atom(model, device):
 
 
 def test_fidelity_matches_manual_formula(model, device):
+    # Logical-gate-type model (replacing the old NISQ-style raw-physical-
+    # counter product): rederive circuit_fidelity by hand from its actual
+    # per-type pieces (handover/crosstalk stay physical; CNOT/T/H/S/idle
+    # are threshold-scaled or cultivation-derived logical rates).
     circuit = Circuit.from_stages(2, [[one_qubit(0)], [one_qubit(1)]])
     placement = piqasso_placement(circuit, model, device, distance=3, seed=0)
     schedule = simulate_one_qubit_circuit(circuit, placement, model)
 
     f = circuit_fidelity(schedule, d=3)
 
-    expected = model.single_qubit_fidelity ** schedule.Ng1
-    expected *= model.carrier_fidelity ** schedule.Nsp
-    t2_us = model.t2_s * 1e6
-    for t_idle in schedule.idle_us.values():
-        expected *= math.exp(-t_idle / t2_us)
+    p_ph = (1.0 - model.cz_fidelity) / 10.0
+    expected = model.handover_fidelity ** schedule.Nh
+    expected *= model.carrier_fidelity ** schedule.Nxtalk
+    expected *= logical_fidelity("CNOT", p_ph, 3) ** schedule.Ncnot
+    expected *= (1.0 - model.cultivation_t_state_infidelity_target) ** schedule.Nt
+
+    n_1q = sum(len(op.detail["qubits"]) for op in schedule.ops if op.kind == "1q_stage")
+    expected *= logical_fidelity("H", p_ph, 3) ** n_1q
+
+    n_s = sum(1 for op in schedule.ops if op.kind == "correction_gate")
+    expected *= logical_fidelity("S", p_ph, 3) ** n_s
+
+    qec_us = model.qec_round_duration_us
+    per_qubit_idle_us = {}
+    for (qubit, _local), t in schedule.idle_us.items():
+        per_qubit_idle_us[qubit] = max(per_qubit_idle_us.get(qubit, 0.0), t)
+    n_idle_rounds = sum(t / qec_us for t in per_qubit_idle_us.values())
+    expected *= logical_fidelity("I", p_ph, 3) ** n_idle_rounds
 
     assert f == pytest.approx(expected)
 
@@ -156,6 +174,36 @@ def test_merge_ng2_and_nmeas_match_merged_patch_geometry(model):
     interior, boundary = _ancilla_weight_counts(merged_patch)
     assert schedule.Ng2 == 4 * interior + 2 * boundary
     assert schedule.Nmeas == interior + boundary
+
+
+def test_record_merge_classifies_cnot_vs_t_by_qubit_sign(model):
+    # Ncnot/Nt are incremented unconditionally (not derived from the
+    # optional merge_handover op, which is skipped when a merge happens
+    # not to move any atoms) - two real data qubits is a CNOT-equivalent;
+    # a negative (factory) qubit on either side is a T-state delivery.
+    from nasim.surface_code import Patch
+
+    patch = Patch.rotated(3)
+    unit = model.gate_pair_dist_um
+    min_x, min_y, max_x, max_y = patch.local_bounds
+    w = (max_x - min_x) * unit
+    anchor0 = Position(-min_x * unit, -min_y * unit, 0.0)
+    anchor1 = Position(anchor0.x + w, anchor0.y, 0.0)
+
+    def side_by_side(qa, qb):
+        pa = PlacedPatch(qa, patch, anchor0)
+        pb = PlacedPatch(qb, patch, anchor1)
+        placement = Placement(model=model, patches=(pa, pb))
+        all_ids = {(p.qubit, a.local) for p in placement.patches for a in p.patch.atoms}
+        return placement, Schedule(model=model, all_atoms=all_ids)
+
+    placement, schedule = side_by_side(0, 1)
+    schedule.record_merge(placement, 0, 1, rounds=1)
+    assert (schedule.Ncnot, schedule.Nt) == (1, 0)
+
+    placement, schedule = side_by_side(-1, 2)
+    schedule.record_merge(placement, -1, 2, rounds=1)
+    assert (schedule.Ncnot, schedule.Nt) == (0, 1)
 
 
 def test_merge_duration_matches_hand_derivation(model):
@@ -656,31 +704,24 @@ def test_circuit_fidelity_does_not_collapse_with_code_distance(model, d):
     assert 0.05 < f < 1.0, f"d={d}: fidelity={f} - still collapsing"
 
 
-def test_per_round_logical_error_rate_improves_with_code_distance():
-    # Isolate the per-round logical error rate (undo the compounding over
-    # the number of rounds actually run, which differs across d since
-    # rounds defaults to the code distance) - this should strictly
-    # decrease as d grows, which is the entire point of a surface code.
+def test_logical_error_rate_improves_with_code_distance():
+    # The entire point of a surface code: below threshold, every logical
+    # gate type's error rate should strictly decrease as d grows. Test
+    # the model directly (logical_error_model.logical_error_rate), not by
+    # trying to back it out of a whole circuit's fidelity.
     model_ = Model.from_yaml(PRESET)
-    prev_p_l = None
-    for d in (3, 5, 7, 9):
-        schedule = _cnot_schedule(model_, d)
-        f = circuit_fidelity(schedule, d=d)
-        num_rounds = sum(1 for op in schedule.ops if op.kind == "mid_circuit_measure")
-        non_logical = (
-            model_.single_qubit_fidelity ** schedule.Ng1
-            * model_.carrier_fidelity ** schedule.Nsp
-            * model_.handover_fidelity ** schedule.Nh
-            * model_.carrier_fidelity ** schedule.Nxtalk
-        )
-        t2_us = model_.t2_s * 1e6
-        for t_idle in schedule.idle_us.values():
-            non_logical *= math.exp(-t_idle / t2_us)
-        per_round_fidelity = (f / non_logical) ** (1.0 / num_rounds)
-        p_l = 1.0 - per_round_fidelity
-        if prev_p_l is not None:
-            assert p_l < prev_p_l, f"d={d}: per-round P_L={p_l} did not improve on {prev_p_l}"
-        prev_p_l = p_l
+    p_ph = (1.0 - model_.cz_fidelity) / 10.0
+    assert p_ph < 8.5e-3, "test assumes we're below the model's own threshold"
+
+    for op in ("I", "H", "S", "CNOT"):
+        prev_p_l = None
+        for d in (3, 5, 7, 9):
+            p_l = logical_error_rate(op, p_ph, d)
+            if prev_p_l is not None:
+                assert p_l < prev_p_l, f"{op} at d={d}: P_L={p_l} did not improve on {prev_p_l}"
+            prev_p_l = p_l
+
+
 
 
 DISTANCE = 3
@@ -730,6 +771,37 @@ def test_magic_consume_executes_and_factory_persists(model):
     # the data qubit and the factory must still be tracked live atoms
     assert any(atom[0] == 0 for atom in schedule.all_atoms)
     assert any(atom[0] == -1 for atom in schedule.all_atoms)
+
+
+def test_magic_consume_fidelity_uses_cultivation_t_state_target(model):
+    # T-gate logical fidelity comes directly from the cultivation escape
+    # stage's own engineered target, not the distance-scaled threshold
+    # formula used for Clifford gates. The yaml default (1e-8) is tight
+    # enough that dividing it out is within float/approx noise for a
+    # single T event, so use a deliberately loose target here to confirm
+    # the term is actually applied, not just assert inequality.
+    from dataclasses import replace
+
+    device = _ez_device(model)
+    circuit = Circuit.from_stages(1, [[one_qubit(0)], [magic_consume(0)]])
+    placement = zap_placement(circuit, model, device, distance=DISTANCE)
+
+    loose_model = replace(model, cultivation_t_state_infidelity_target=0.1)
+    schedule, _ = simulate_circuit(circuit, placement, loose_model, device=device,
+                                   factories=_factories(loose_model, [-1]))
+    assert schedule.Nt >= 1
+
+    f = circuit_fidelity(schedule, d=DISTANCE)
+    f_without_t_term = f / ((1.0 - loose_model.cultivation_t_state_infidelity_target) ** schedule.Nt)
+    assert f_without_t_term == pytest.approx(f / (0.9 ** schedule.Nt))
+    assert f_without_t_term != pytest.approx(f)
+
+    # a tighter (smaller) infidelity target should strictly improve fidelity
+    tighter_model = replace(model, cultivation_t_state_infidelity_target=1e-3)
+    schedule_tight, _ = simulate_circuit(circuit, placement, tighter_model, device=device,
+                                         factories=_factories(tighter_model, [-1]))
+    f_tight = circuit_fidelity(schedule_tight, d=DISTANCE)
+    assert f_tight >= f
 
 
 def test_magic_consume_without_factories_raises(model):

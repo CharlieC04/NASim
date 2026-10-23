@@ -10,7 +10,9 @@ requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.26",
     "pyyaml>=6.0",
-    "scipy>=1.11"
+    "scipy>=1.11",
+    "qiskit>=1.0",
+    "qiskit-qasm3-import>=0.4"
 ]
 
 [project.optional-dependencies]

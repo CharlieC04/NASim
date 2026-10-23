@@ -12,8 +12,9 @@ class CultivationResult:
     num_escape_attempts: int
     total_duration_us: float
 
-def simulate_cultivation(model: Model, rng: random.Random) -> CultivationResult:
+def simulate_cultivation(model: Model, rng: random.Random, distance: int) -> CultivationResult:
 
+    escape_cycles = model.escape_cycles_for_distance(distance)
     num_check = num_escape = 0
     total_us = 0.0
     while True:
@@ -22,7 +23,7 @@ def simulate_cultivation(model: Model, rng: random.Random) -> CultivationResult:
         if rng.random() >= model.cultivation_check_success_prob: continue
 
         num_escape += 1
-        total_us += model.cultivation_escape_cycles * model.qec_round_duration_us
+        total_us += escape_cycles * model.qec_round_duration_us
         if rng.random() < model.cultivation_escape_success_prob:
             return CultivationResult(num_check, num_escape, total_us)
 
@@ -99,6 +100,6 @@ class Factory:
 
     def attempt_escape(self) -> tuple[bool, float]:
 
-        duration_us = self.model.cultivation_escape_cycles * self.model.qec_round_duration_us
+        duration_us = self.model.escape_cycles_for_distance(self.distance) * self.model.qec_round_duration_us
         success = self.rng.random() < self.model.cultivation_escape_success_prob
         return success, duration_us

@@ -50,17 +50,26 @@ class Model:
     cultivation_check_cycles: float
     cultivation_num_subfactories: int
     cultivation_escape_success_prob: float
-    cultivation_escape_cycles: float
+    cultivation_escape_cycles_by_distance: dict[int, float]
     cultivation_teleportation_success_prob: float
+    cultivation_t_state_infidelity_target: float
 
     @property
     def qec_round_duration_us(self) -> float:
 
         """
-        4 seq CZ + readout
+        4 seq CZ
         """
 
-        return 4 * self.cz_duration_us + self.readout_time_us
+        return 4 * self.cz_duration_us
+
+    def escape_cycles_for_distance(self, distance: int) -> float:
+
+        table = self.cultivation_escape_cycles_by_distance
+        if distance in table: return table[distance]
+        if distance < min(table): return table[min(table)]
+
+        raise ValueError("No escape cycle count for code distance")
 
 
     @classmethod
@@ -102,6 +111,9 @@ class Model:
             cultivation_check_cycles=cultivation["check_cycles"],
             cultivation_num_subfactories=cultivation["num_subfactories"],
             cultivation_escape_success_prob=cultivation["escape_success_prob"],
-            cultivation_escape_cycles=cultivation["escape_cycles"],
-            cultivation_teleportation_success_prob=cultivation["teleportation_success_prob"]
+            cultivation_escape_cycles_by_distance = {
+                int(d): float(v) for d, v in cultivation["escape_cycles_by_distance"].items()
+            },
+            cultivation_teleportation_success_prob=cultivation["teleportation_success_prob"],
+            cultivation_t_state_infidelity_target=cultivation["t_state_infidelity_target"]
         )

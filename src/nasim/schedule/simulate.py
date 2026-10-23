@@ -9,7 +9,7 @@ from nasim.resource import Factory
 from nasim.schedule.core import Schedule, _all_atom_ids
 from nasim.schedule.idle import _idle_qubit_management
 from nasim.schedule.magic import _resolve_magic_requests
-from nasim.schedule.routing import _retarget_adjacent, _retarget_pair_into_entanglement_zone
+from nasim.schedule.routing import _retarget_adjacent, _retarget_pair_into_entanglement_zone, _legalise_by_zone
 
 def simulate_circuit(circuit: Circuit, placement: Placement, model: Model, device: Device | None = None,
                      factories: list[Factory] | None = None) -> tuple[Schedule, Placement]:
@@ -63,9 +63,9 @@ def simulate_circuit(circuit: Circuit, placement: Placement, model: Model, devic
             moves = moves_between(current, target_placement)
             moving_qubits = {m.qubit for m in moves}
             stationary = [p.anchor for p in current.patches if p.qubit not in moving_qubits]
-            frames = legalise_frames(moves, stationary)
-            for frame in frames:
-                schedule.record_move_frame(frame, current)
+            rounds = _legalise_by_zone(moves, stationary, device)
+            for lanes in rounds:
+                schedule.record_move_round(lanes, current)
             current = target_placement
 
             for gate in two_qubit_gates:
