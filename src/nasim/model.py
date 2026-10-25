@@ -54,6 +54,9 @@ class Model:
     cultivation_teleportation_success_prob: float
     cultivation_t_state_infidelity_target: float
 
+    # Only run SE every N cycles for idle qubits (based on FT-Weave)
+    logical_se_interval: int = 1
+
     @property
     def qec_round_duration_us(self) -> float:
 
@@ -115,5 +118,6 @@ class Model:
                 int(d): float(v) for d, v in cultivation["escape_cycles_by_distance"].items()
             },
             cultivation_teleportation_success_prob=cultivation["teleportation_success_prob"],
-            cultivation_t_state_infidelity_target=cultivation["t_state_infidelity_target"]
+            cultivation_t_state_infidelity_target=cultivation["t_state_infidelity_target"],
+            logical_se_interval=int(data.get("logical_se_interval", 1))
         )

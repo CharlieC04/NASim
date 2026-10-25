@@ -175,7 +175,7 @@ class Schedule:
                 targets=tuple(targets), detail={"substep": step, "active_gates": active}
             ))
 
-        measure_duration = self.model.readout_time_us
+        measure_duration = 0.0 # FT-Weave assumes no MCM cost for ancilla measures (sus)
         start_us = self._advance(targets, measure_duration)
         self.Nmeas += interior_count + boundary_count
         self.ops.append(ScheduleOp(
@@ -290,10 +290,7 @@ def circuit_fidelity(schedule: Schedule, *, d: int) -> float:
     model = schedule.model
     p_ph = (1.0 - model.cz_fidelity) / PROJ_FACTOR
 
-    f = model.handover_fidelity ** schedule.Nh
-    f *= model.carrier_fidelity ** schedule.Nxtalk
-
-    f *= logical_fidelity("CNOT", p_ph, d) ** schedule.Ncnot
+    f = logical_fidelity("CNOT", p_ph, d) ** schedule.Ncnot
     f *= (1.0 - model.cultivation_t_state_infidelity_target) ** schedule.Nt
 
     n_1q = sum(len(op.detail["qubits"]) for op in schedule.ops if op.kind == "1q_stage")
@@ -304,9 +301,9 @@ def circuit_fidelity(schedule: Schedule, *, d: int) -> float:
 
     qec_us = model.qec_round_duration_us
     per_qubit_idle_us: dict[int, float] = {}
-    for (qubit, _local), t in schedule.idle_us.items():
+    for (qubit, _), t in schedule.idle_us.items():
         per_qubit_idle_us[qubit] = max(per_qubit_idle_us.get(qubit, 0.0), t)
-    n_idle_rounds = sum(t / qec_us for t in per_qubit_idle_us.values())
+    n_idle_rounds = sum(t / qec_us for t in per_qubit_idle_us.values()) / model.logical_se_interval
     f *= logical_fidelity("I", p_ph, d) ** n_idle_rounds
 
     return f

@@ -213,7 +213,10 @@ def test_merge_duration_matches_hand_derivation(model):
 
     schedule.record_merge(placement, 0, 1, rounds=1)
 
-    expected = 2 * model.handover_time_us + 4 * model.cz_duration_us + model.readout_time_us
+    # Mid-circuit ancilla measurement isn't charged readout_time_us - that's
+    # a one-time terminal cost for migrating a qubit to the readout layer
+    # (Piqasso Table II), not a per-round cost.
+    expected = 2 * model.handover_time_us + 4 * model.cz_duration_us
     assert schedule.clock_us == pytest.approx(expected)
 
 
