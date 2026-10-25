@@ -9,6 +9,7 @@ class GateType(Enum):
 
     ONE_QUBIT = "1q"
     TWO_QUBIT = "2q"
+    MAGIC_CONSUME = "magic"
 
 @dataclass(frozen=True)
 class Gate:
@@ -21,6 +22,9 @@ def one_qubit(qubit: int) -> Gate:
 
 def two_qubit(a: int, b: int) -> Gate:
     return Gate(GateType.TWO_QUBIT, (a,b))
+
+def magic_consume(qubit: int) -> Gate:
+    return Gate(GateType.MAGIC_CONSUME, (qubit,))
 
 @dataclass(frozen=True)
 class Circuit:

@@ -13,12 +13,13 @@ _ZONE_EDGE = {"storage": "#cbd5e0", "entanglement": "#90cdf4"}
 
 def _zone_bbox(zone) -> tuple[float, float, float, float]:
 
-    slm = zone.slm
-    x0 = slm.origin.x
-    x1 = slm.origin.x + slm.cols * slm.pitch_x_um
-    y0 = slm.origin.y
-    y1 = slm.origin.y + slm.rows * slm.pitch_y_um
-    return min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
+    x0s, y0s, x1s, y1s = [], [], [], []
+    for slm in zone.slms:
+        x0s.append(slm.origin.x)
+        x1s.append(slm.origin.x + slm.cols * slm.pitch_x_um)
+        y0s.append(slm.origin.y)
+        y1s.append(slm.origin.y + slm.rows * slm.pitch_y_um)
+    return min(min(x0s), min(x1s)), min(min(y0s), min(y1s)), max(max(x0s), max(x1s)), max(max(y0s), max(y1s))
 
 def zone_bbox_padded(zone, *, pad_um: float = 3.0) -> tuple[float, float, float, float]:
 
@@ -128,19 +129,22 @@ def plot_placement(
 
     targeted_qubits = targeted_qubits or set()
     for placed in placement.patches:
+        is_factory = placed.qubit < 0
         is_target = placed.qubit in targeted_qubits
         x0, y0, w, h = placement.bounding_box_um(placed)
+        default_edge = "#6b46c1" if is_factory else "#718096"
         ax.add_patch(Rectangle(
             (x0, y0), w, h, fill=False,
             linestyle="-" if is_target else "--",
-            linewidth=2.5 if is_target else 1.0,
-            edgecolor=highlight_color if is_target else "#718096",
+            linewidth=2.5 if is_target else (1.6 if is_factory else 1.0),
+            edgecolor=highlight_color if is_target else default_edge,
             zorder=2 if is_target else 1,
         ))
+        label = f"F{-placed.qubit}" if is_factory else f"q{placed.qubit}"
         ax.annotate(
-            f"q{placed.qubit}", (x0, y0 + h), xytext=(2, -2), textcoords="offset points",
+            label, (x0, y0 + h), xytext=(2, -2), textcoords="offset points",
             ha="left", va="top", fontsize=9, fontweight="bold",
-            color=highlight_color if is_target else "#1a202c", zorder=4,
+            color=highlight_color if is_target else (default_edge if is_factory else "#1a202c"), zorder=4,
         )
 
     seen_roles = set()
@@ -157,8 +161,11 @@ def plot_placement(
     ax.set_xlabel("x (um)")
     ax.set_ylabel("y (um)")
     d = placement.patches[0].patch.distance if placement.patches else "?"
+    num_logical = sum(1 for p in placement.patches if p.qubit >= 0)
+    num_factories = len(placement.patches) - num_logical
+    factory_suffix = f" + {num_factories} factory(ies)" if num_factories else ""
     ax.set_title(
-        f"{placement.model.name} - {len(placement.patches)} logical qubits, "
+        f"{placement.model.name} - {num_logical} logical qubits{factory_suffix}, "
         f"d={d} rotated surface code"
     )
     ax.legend(loc="upper right")

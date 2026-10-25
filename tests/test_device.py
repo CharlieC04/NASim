@@ -85,7 +85,7 @@ def test_zoned_device_zones_do_not_overlap(model):
     )
     storage = next(z for z in device.zones if z.kind == "storage")
     entanglement = next(z for z in device.zones if z.kind == "entanglement")
-    assert not _slms_overlap(storage.slm, entanglement.slm)
+    assert not _slms_overlap(storage.slms[0], entanglement.slms[0])
 
 
 def test_zoned_device_merges_sites_from_both_zones(model):

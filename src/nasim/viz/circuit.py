@@ -10,6 +10,9 @@ _BOX_EDGE = "#2d3748"
 _DOT_COLOR = "#2d3748"
 _STAGE_BAND = "#f3effe"
 _ONEQ_HIGHLIGHT = "#d69e2e"
+_MAGIC_FACE = "#e9d8fd"
+_MAGIC_EDGE = "#6b46c1"
+_MAGIC_HIGHLIGHT = "#6b46c1"
 
 _BOX_SIZE = 0.6
 _DOT_SIZE = 110
@@ -28,6 +31,26 @@ def _draw_1q_box(ax, stage_idx: int, q: int, highlight: dict | None) -> None:
     )
     ax.add_patch(box)
     ax.text(stage_idx, q, "1Q", ha="center", va="center", fontsize=9,
+             family="serif", fontweight="bold", color=text_color, zorder=z + 1)
+
+
+def _draw_magic_box(ax, stage_idx: int, q: int, highlight: dict | None) -> None:
+    """A magic_consume gate: a logical T gate applied by teleportation-
+    consumption of a prepared magic-resource state, visually distinct
+    from an ordinary local 1Q gate since it isn't a free local pulse."""
+
+    if highlight is not None:
+        face, edge, lw, z, text_color = highlight["color"], "#1a202c", 2.5, 4, "white"
+    else:
+        face, edge, lw, z, text_color = _MAGIC_FACE, _MAGIC_EDGE, 1.2, 2, _MAGIC_EDGE
+
+    box = FancyBboxPatch(
+        (stage_idx - _BOX_SIZE / 2, q - _BOX_SIZE / 2), _BOX_SIZE, _BOX_SIZE,
+        boxstyle="round,pad=0.02,rounding_size=0.08",
+        facecolor=face, edgecolor=edge, linewidth=lw, zorder=z,
+    )
+    ax.add_patch(box)
+    ax.text(stage_idx, q, "T", ha="center", va="center", fontsize=10,
              family="serif", fontweight="bold", color=text_color, zorder=z + 1)
 
 
@@ -67,12 +90,15 @@ def plot_circuit(circuit: Circuit, ax, *, current_stage: int | None = None, high
         ax.text(-0.5, q, rf"$q_{{{q}}}$", ha="right", va="center", fontsize=12, family="serif", zorder=2)
 
     h_1q_qubits: set[int] = set()
+    h_magic_qubits: set[int] = set()
     h_2q: dict[frozenset, dict] = {}
     for h in highlights or []:
         if h["stage"] != current_stage:
             continue
         if h["kind"] == "1q":
             h_1q_qubits.update(h["qubits"])
+        elif h["kind"] == "magic":
+            h_magic_qubits.update(h["qubits"])
         else:
             h_2q[frozenset(h["qubits"])] = h
 
@@ -82,6 +108,10 @@ def plot_circuit(circuit: Circuit, ax, *, current_stage: int | None = None, high
                 (q,) = gate.qubits
                 hl = {"color": _ONEQ_HIGHLIGHT} if (stage_idx == current_stage and q in h_1q_qubits) else None
                 _draw_1q_box(ax, stage_idx, q, hl)
+            elif gate.type is GateType.MAGIC_CONSUME:
+                (q,) = gate.qubits
+                hl = {"color": _MAGIC_HIGHLIGHT} if (stage_idx == current_stage and q in h_magic_qubits) else None
+                _draw_magic_box(ax, stage_idx, q, hl)
             else:
                 qa, qb = gate.qubits
                 hl = h_2q.get(frozenset((qa, qb))) if stage_idx == current_stage else None

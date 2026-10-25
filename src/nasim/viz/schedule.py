@@ -12,10 +12,17 @@ from nasim.viz.circuit import plot_circuit
 
 _MERGE_COLOR = "#6b46c1"
 _MERGE_PULSE = "#e9d8fd"
+_MAGIC_COLOR = "#6b46c1"
+_MAGIC_PULSE = "#e9d8fd"
 _ONEQ_COLOR = "#d69e2e"
 _MOVE_COLOR = "#e53e3e"
 
 _SURGERY_KINDS = ("merge_handover", "2q_substep", "mid_circuit_measure", "split_handover")
+
+# Pure time-advance ops: no move/merge/split, so the placement is visually
+# identical to the previous frame - skip them rather than rendering a
+# blank, uninformative frame for every factory check-stage retry.
+_SKIP_KINDS = ("await_resource", "redistribution_delay")
 
 
 def group_ops_for_display(ops: list) -> list[list]:
@@ -23,7 +30,9 @@ def group_ops_for_display(ops: list) -> list[list]:
     groups: list[list] = []
     i, n = 0, len(ops)
     while i < n:
-        if ops[i].kind in _SURGERY_KINDS:
+        if ops[i].kind in _SKIP_KINDS:
+            i += 1
+        elif ops[i].kind in _SURGERY_KINDS:
             group = [ops[i]]
             i += 1
             while i < n and ops[i].kind in ("2q_substep", "mid_circuit_measure"):
@@ -39,11 +48,17 @@ def group_ops_for_display(ops: list) -> list[list]:
     return groups
 
 
-def _apply_op(current: dict, op) -> dict:
+def _apply_op(current: dict, op, patch_by_qubit: dict) -> dict:
 
-    if op.kind == "move_frame":
+    if op.kind == "move_round":
         current = dict(current)
-        for move in op.detail["moves"]:
+        for move in (m for lane in op.detail["lanes"] for m in lane):
+            # A factory resource is auto-placed lazily, the first time
+            # it's used - its first appearance in the schedule can be a
+            # bare move (not necessarily a merge), so seed it here if
+            # this is the first time we've seen it.
+            if move.qubit not in current:
+                current[move.qubit] = PlacedPatch(qubit=move.qubit, patch=patch_by_qubit[move.qubit], anchor=move.source)
             prior = current[move.qubit]
             current[move.qubit] = PlacedPatch(qubit=move.qubit, patch=prior.patch, anchor=move.target)
     elif op.kind == "merge_handover":
@@ -53,7 +68,8 @@ def _apply_op(current: dict, op) -> dict:
         anchor = op.detail["anchor"]
         origin_qubit = op.detail["origin_qubit"]
         other_qubit = qb if origin_qubit == qa else qa
-        del current[other_qubit]
+        if other_qubit in current:
+            del current[other_qubit]
         current[origin_qubit] = PlacedPatch(qubit=origin_qubit, patch=merged_patch, anchor=anchor)
     elif op.kind == "split_handover":
         current = dict(current)
@@ -64,7 +80,16 @@ def _apply_op(current: dict, op) -> dict:
     return current
 
 
-def snapshots_from_schedule(initial: Placement, groups: list[list]) -> list[Placement]:
+def snapshots_from_schedule(initial: Placement, groups: list[list], final: Placement | None = None) -> list[Placement]:
+
+    """final, when given, supplies patch shapes for resources (check/escape
+    factories) that are auto-placed lazily mid-schedule and so don't
+    appear in `initial` - their first appearance can be a bare move, not
+    necessarily a merge."""
+
+    patch_by_qubit = {p.qubit: p.patch for p in initial.patches}
+    if final is not None:
+        patch_by_qubit.update({p.qubit: p.patch for p in final.patches})
 
     snapshots = [initial]
     current = {p.qubit: p for p in initial.patches}
@@ -76,10 +101,18 @@ def snapshots_from_schedule(initial: Placement, groups: list[list]) -> list[Plac
                 break
 
         for i, op in enumerate(group):
-            current = _apply_op(current, op)
+            current = _apply_op(current, op, patch_by_qubit)
             if i == representative_idx:
                 snapshots.append(Placement(model=initial.model, patches=tuple(current[q] for q in sorted(current))))
     return snapshots
+
+
+def _is_magic_group(qubits) -> bool:
+    # Factory resources always carry a negative qubit id - a magic-state
+    # delivery is a merge/split where one side is a factory. (Check-stage
+    # redistribution is not a merge at all - see "redistribution_delay"
+    # ops - so this is never true for both sides at once.)
+    return any(q < 0 for q in qubits)
 
 
 def _surgery_status(idx: int, total: int, group: list) -> str:
@@ -100,6 +133,14 @@ def _surgery_status(idx: int, total: int, group: list) -> str:
         origin = group[0].targets[0][0]
         qubits = [origin]
 
+    if _is_magic_group(qubits):
+        real_qubit = next(q for q in qubits if q >= 0)
+        factory_id = next(q for q in qubits if q < 0)
+        return (
+            f"frame {idx}/{total}: magic-state consumption -> q{real_qubit} "
+            f"(factory F{-factory_id}, {rounds} rounds, {total_cz} CZ, {total_meas} meas, {duration:.1f}us)"
+        )
+
     return (
         f"frame {idx}/{total}: lattice surgery q{qubits} -> q{origin} "
         f"({rounds} rounds, {total_cz} CZ, {total_meas} meas, {duration:.1f}us)"
@@ -108,12 +149,12 @@ def _surgery_status(idx: int, total: int, group: list) -> str:
 
 class ScheduleViewer:
 
-    def __init__(self, initial: Placement, schedule: Schedule, circuit, device=None):
+    def __init__(self, initial: Placement, schedule: Schedule, circuit, device=None, final: Placement | None = None):
         self.schedule = schedule
         self.circuit = circuit
         self.device = device
         self.groups = group_ops_for_display(schedule.ops)
-        self.snapshots = snapshots_from_schedule(initial, self.groups)
+        self.snapshots = snapshots_from_schedule(initial, self.groups, final)
         self.frame_idx = 0
         self._xlim, self._ylim = self._global_bounds()
 
@@ -192,9 +233,14 @@ class ScheduleViewer:
                 else:
                     origin_qubit = group[0].targets[0][0]
                     qubits = [origin_qubit]
+                is_magic = _is_magic_group(qubits)
+                color, pulse = (_MAGIC_COLOR, _MAGIC_PULSE) if is_magic else (_MERGE_COLOR, _MERGE_PULSE)
                 plot_placement(placement, ax=ax, targeted_qubits={origin_qubit}, pulse_active=True,
-                                highlight_color=_MERGE_COLOR, pulse_color=_MERGE_PULSE, device=self.device)
-                if len(qubits) == 2:
+                                highlight_color=color, pulse_color=pulse, device=self.device)
+                if is_magic:
+                    real_qubit = next(q for q in qubits if q >= 0)
+                    highlights.append({"stage": stage_idx, "qubits": [real_qubit], "color": _MAGIC_COLOR, "kind": "magic"})
+                elif len(qubits) == 2:
                     highlights.append({"stage": stage_idx, "qubits": qubits, "color": _MERGE_COLOR, "kind": "2q_active"})
             elif group[0].kind == "1q_stage":
                 op = group[0]
@@ -202,17 +248,19 @@ class ScheduleViewer:
                 plot_placement(placement, ax=ax, targeted_qubits=targeted, pulse_active=True, device=self.device)
                 status = f"frame {idx}/{total}: 1Q gate stage - targets={sorted(targeted)}"
                 highlights.append({"stage": stage_idx, "qubits": sorted(targeted), "color": _ONEQ_COLOR, "kind": "1q"})
-            elif group[0].kind == "move_frame":
+            elif group[0].kind == "move_round":
                 op = group[0]
                 plot_placement(placement, ax=ax, device=self.device)
-                for move in op.detail["moves"]:
+                for move in (m for lane in op.detail["lanes"] for m in lane):
                     ax.annotate(
                         "", xy=(move.target.x, move.target.y),
                         xytext=(move.source.x, move.source.y),
                         arrowprops=dict(arrowstyle="->", color=_MOVE_COLOR, lw=1.5, alpha=0.8),
                         zorder=5,
                     )
-                status = f"frame {idx}/{total}: move frame - qubits={op.detail['qubits']}"
+                num_lanes = len(op.detail["lanes"])
+                lane_note = f", {num_lanes} AOD lanes" if num_lanes > 1 else ""
+                status = f"frame {idx}/{total}: move round{lane_note} - qubits={op.detail['qubits']}"
                 if stage_idx is not None:
                     for gate in self.circuit.stages[stage_idx]:
                         if gate.type is GateType.TWO_QUBIT:

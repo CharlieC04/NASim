@@ -189,8 +189,10 @@ def zap_placement(circuit: Circuit, model: Model, device: Device, *, distance: i
 
     storage_zones = [z for z in device.zones if z.kind == "storage"]
     ent_zones = [z for z in device.zones if z.kind == "entanglement"]
-    if not storage_zones or not ent_zones:
-        raise ValueError("Requires both zone types")
+    if not ent_zones:
+        raise ValueError("Requires an entanglement zone")
+
+    cand_zones = storage_zones if storage_zones else ent_zones
 
     n = circuit.num_qubits
     patch = Patch.rotated(distance)
@@ -201,9 +203,9 @@ def zap_placement(circuit: Circuit, model: Model, device: Device, *, distance: i
     def site_anchor(site: Position) -> Position:
         return Position(site.x - min_x * unit_um, site.y - min_y * unit_um, site.z)
 
-    storage_sites = [s for z in storage_zones for s in z.sites]
+    cand_sites = [s for z in cand_zones for s in z.sites]
     ent_sites = [s for z in ent_zones for s in z.sites]
-    if len(storage_sites) < n:
+    if len(cand_sites) < n:
         raise ValueError("Circuit too big to store")
 
     def nearest_entanglement(u: Position) -> tuple[Position, float]:
@@ -229,7 +231,7 @@ def zap_placement(circuit: Circuit, model: Model, device: Device, *, distance: i
 
     for q in order:
         best_site, best_score, best_target = None, math.inf, None
-        for site in storage_sites:
+        for site in cand_sites:
             if site in used_sites: continue
 
             candidate = site_anchor(site)

@@ -44,10 +44,11 @@ def conflict_reason(a: Move, b: Move) -> tuple[str, str] | None:
         if a0 < b0 and a1 >= b1: return (axis, "crossing")
         if a0 > b0 and a1 <= b1: return (axis, "crossing")
 
-def compatible_2d(a: Move, b: Move) -> bool:
+def tone_compatible(a: Move, b: Move):
 
-    if conflict_reason(a, b) is not None:
-        return False
+    return conflict_reason(a, b) is None
+
+def geo_compatible(a: Move, b: Move):
 
     margin = a.clearance_um + b.clearance_um
     if margin > 0:
@@ -57,7 +58,14 @@ def compatible_2d(a: Move, b: Move) -> bool:
 
     return True
 
-def _greedy_max_indep_set(moves: list[Move]) -> list[Move]:
+def compatible_2d(a: Move, b: Move) -> bool:
+
+    if not tone_compatible(a, b): return False
+    return geo_compatible(a, b)
+
+    
+
+def _greedy_max_indep_set(moves: list[Move], *, cross_lane: list[Move] = ()) -> list[Move]:
 
     """
     Build conflict graph and pick in asc order
@@ -75,7 +83,7 @@ def _greedy_max_indep_set(moves: list[Move]) -> list[Move]:
     chosen: list[int] = []
     visited: set[int] = set()
     for i in order:
-        if i not in visited:
+        if i not in visited and all(geo_compatible(moves[i], c) for c in cross_lane):
             chosen.append(i)
             visited.add(i)
             visited.update(conflict[i])
@@ -138,13 +146,14 @@ def _resolve_violations(moves: list[Move], occupied: set[tuple[float, float]]) -
         removed.append(next(m for m in remaining if m.qubit == best_qubit))
         remaining = [m for m in remaining if m.qubit != best_qubit]
 
-def _build_frame_with_parking(moves: list[Move], occupied: set[tuple[float, float]]) -> tuple[list[Move], list[Move]]:
+def _build_lane_with_parking(moves: list[Move], occupied: set[tuple[float, float]],
+                              *, cross_lane: list[Move] = ()) -> tuple[list[Move], list[Move]]:
 
     """
-    Build a frame of concurrent moves
+    Build one AOD lane of concurrent moves
     """
 
-    chosen = _greedy_max_indep_set(moves)
+    chosen = _greedy_max_indep_set(moves, cross_lane=cross_lane)
     chosen_by_qubit = {m.qubit: m for m in chosen}
     deferred = [m for m in moves if m.qubit not in chosen_by_qubit]
     parking_moves: list[Move] = []
@@ -164,7 +173,8 @@ def _build_frame_with_parking(moves: list[Move], occupied: set[tuple[float, floa
                 partner, (axis, _) = blockers[0]
                 parking = _park(move, axis, partner)
                 remainder = _remainder(move, parking)
-                if all(compatible_2d(remainder, k) for k in chosen_by_qubit.values()) and all(compatible_2d(parking, p) for p in parking_moves):
+                if (all(compatible_2d(remainder, k) for k in chosen_by_qubit.values()) and all(compatible_2d(parking, p) for p in parking_moves)
+                and all(geo_compatible(parking, c) for c in cross_lane)):
                     parking_moves.append(parking)
                     chosen_by_qubit[remainder.qubit] = remainder
                     progress = True
@@ -181,7 +191,32 @@ def _build_frame_with_parking(moves: list[Move], occupied: set[tuple[float, floa
 
     return parking_moves, final_moves
 
-def legalise_frames(moves: list[Move], stationary: list[Position] = ()) -> list[list[Move]]:
+def _build_round_with_parking(moves: list[Move], occupied: set[tuple[float, float]], num_aods: int) -> tuple[list[Move], list[list[Move]]]:
+
+    """
+    Build one round of <= num_aods conc. lanes. Each lane is tone compat internally, lanes only need to be geo compat with each other
+    """
+
+    lanes: list[list[Move]] = []
+    cross_lane: list[Move] = []
+    all_parking: list[Move] = []
+    remaining = list(moves)
+
+    for _ in range(max(1, num_aods)):
+        if not remaining: break
+
+        parking_moves, lane = _build_lane_with_parking(remaining, occupied, cross_lane=cross_lane)
+        if not lane: break
+
+        all_parking.extend(parking_moves)
+        lanes.append(lane)
+        cross_lane.extend(lane)
+        scheduled = {m.qubit for m in lane}
+        remaining = [m for m in remaining if m.qubit not in scheduled]
+
+    return all_parking, lanes
+
+def legalise_frames(moves: list[Move], stationary: list[Position] = (), num_aods: int = 1) -> list[list[list[Move]]]:
 
     """
     Partition moves into AOD frames. Repeatedly extract one maximal set of mutually compatible moves
@@ -190,7 +225,7 @@ def legalise_frames(moves: list[Move], stationary: list[Position] = ()) -> list[
 
     occupied = {(p.x, p.y) for p in stationary}
     remaining = list(moves)
-    frames: list[list[Move]] = []
+    rounds: list[list[list[Move]]] = []
     while remaining:
         pending_sources = {m.source for m in remaining}
         safe = [m for m in remaining if m.target not in pending_sources]
@@ -198,14 +233,14 @@ def legalise_frames(moves: list[Move], stationary: list[Position] = ()) -> list[
             cycle_qubits = sorted(m.qubit for m in remaining)
             raise ValueError("Cannot make progress due to a cycle")
 
-        parking_moves, frame = _build_frame_with_parking(safe, occupied)
+        parking_moves, lanes = _build_round_with_parking(safe, occupied, num_aods)
         if parking_moves:
-            frames.append(parking_moves)
-        scheduled = {m.qubit for m in frame}
-        frames.append(frame)
+            rounds.append([parking_moves])
+        scheduled = {m.qubit for lane in lanes for m in lane}
+        rounds.append(lanes)
         remaining = [m for m in remaining if m.qubit not in scheduled]
 
-    return frames
+    return rounds
 
 def moves_between(before: Placement, after: Placement) -> list[Move]:
 
