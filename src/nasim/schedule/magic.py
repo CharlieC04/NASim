@@ -13,6 +13,8 @@ from nasim.schedule.core import Schedule, ScheduleOp, _data_atom_ids
 from nasim.schedule.routing import _nearest_free_zone_site, _retarget_pair_into_entanglement_zone, _legalise_by_zone
 from nasim.surface_code import Patch
 
+PRIORITY_WEIGHT = 1.0
+
 def _ensure_placed(current: Placement, zone, resource_id: int, distance: int, reference_anchor) -> Placement:
 
     """
@@ -31,6 +33,30 @@ def _ensure_placed(current: Placement, zone, resource_id: int, distance: int, re
     return Placement(model=current.model, patches=current.patches + (PlacedPatch(
         qubit=resource_id, patch=patch, anchor=site
     ),))
+
+def _cand_delivery_us(current: Placement, model, source_id: int, tgt_id: int) -> float:
+
+    a = next(p.anchor for p in current.patches if p.qubit == source_id)
+    b = next(p.anchor for p in current.patches if p.qubit == tgt_id)
+    return math.hypot(a.x - b.x, a.y - b.y) / model.v_xy_um_per_us
+
+def _best_other_source_us(current: Placement, schedule: Schedule, q: int, waiting_ids: set[int],
+                          busy_escape_us: dict[int, float], by_id: dict[int, Factory]) -> float | None:
+
+    """
+    Resource rematerialisation from FT-Weave. Estimate time until closest not ready factory could deliver instead
+    """
+
+    cands = []
+    for fid in waiting_ids:
+        remaining_check_us = max(0.0, by_id[fid].check_ready_us - schedule.clock_us)
+        est_escape_us = schedule.model.escape_cycles_for_distance(by_id[fid].distance) * schedule.model.qec_round_duration_us
+        cands.append(remaining_check_us + est_escape_us + _cand_delivery_us(current, schedule.model, fid, q))
+
+    for fid, finish_us in busy_escape_us.items():
+        cands.append(max(0.0, finish_us - schedule.clock_us) + _cand_delivery_us(current, schedule.model, fid, q))
+
+    return min(cands) if cands else None
 
 def _teleport_consume(current: Placement, device: Device, schedule: Schedule, qubit_a: int, qubit_b: int) -> Placement:
 
@@ -83,7 +109,8 @@ def _return_to_zone(current: Placement, device: Device, schedule: Schedule, zone
         )
     )
 
-def _match_by_distance(current: Placement, a_ids: list[int], b_ids: list[int]) -> list[tuple[int, int]]:
+def _match_by_distance(current: Placement, a_ids: list[int], b_ids: list[int], *,
+                       priority_bonus_us: dict[int, float] | None = None) -> list[tuple[int, int]]:
 
     """
     Minimum-cost bipartite match. Used for check-stage redist and escape fact -> deliv
@@ -91,11 +118,13 @@ def _match_by_distance(current: Placement, a_ids: list[int], b_ids: list[int]) -
 
     k = min(len(a_ids), len(b_ids))
     if k == 0: return []
+    priority_bonus_us = priority_bonus_us or {}
 
     def pos(resource_id: int):
         return next(p.anchor for p in current.patches if p.qubit == resource_id)
 
-    cost = np.array([[math.hypot(pos(a).x - pos(b).x, pos(a).y - pos(b).y) for b in b_ids] for a in a_ids])
+    cost = np.array([[math.hypot(pos(a).x - pos(b).x, pos(a).y - pos(b).y) / current.model.v_xy_um_per_us - priority_bonus_us.get(b, 0.0) 
+                      for b in b_ids] for a in a_ids])
     row_ind, col_ind = linear_sum_assignment(cost)
     return [(a_ids[i], b_ids[j]) for i, j in zip(row_ind[:k], col_ind[:k])]
 
@@ -129,6 +158,7 @@ def _resolve_magic_requests(current: Placement, device: Device, schedule: Schedu
 
     by_id = {f.resource_id: f for f in factories}
     remaining = list(qubits)
+    waiting_since_us = {q: schedule.clock_us for q in remaining}
     waiting_ids = {f.resource_id for f in factories} # running check stage
     busy_escape_us: dict[int, float] = {} # time escape finishes
     pending_escape_outcome: dict[int, bool] = {} # escape success
@@ -136,11 +166,25 @@ def _resolve_magic_requests(current: Placement, device: Device, schedule: Schedu
 
     while remaining:
 
-        for fid, q in _match_by_distance(current, wait_for_rus_ids, remaining):
+        for fid, q in _match_by_distance(current, wait_for_rus_ids, remaining,
+                                         priority_bonus_us={
+                                             q: PRIORITY_WEIGHT * (schedule.clock_us - waiting_since_us[q]) for q in remaining
+                                         }):
+
+            now_us = _cand_delivery_us(current, schedule.model, fid, q)
+            alt_us = _best_other_source_us(current, schedule, q, waiting_ids, busy_escape_us, by_id)
+
+            if alt_us is not None and alt_us < now_us:
+                by_id[fid].restart(now_us=schedule.clock_us)
+                waiting_ids.add(fid)
+                wait_for_rus_ids.remove(fid)
+                continue
+            
             current = _teleport_consume(current, device, schedule, fid, q)
             current = _return_to_zone(current, device, schedule, ent_zone, fid)
             wait_for_rus_ids.remove(fid)
             remaining.remove(q)
+            waiting_since_us.pop(q, None)
 
             if by_id[fid].rng.random() >= schedule.model.cultivation_teleportation_success_prob:
                 data_atoms = _data_atom_ids(current, q)
