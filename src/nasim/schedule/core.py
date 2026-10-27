@@ -273,6 +273,146 @@ class Schedule:
 
         self.retarget_atoms(remove=merged_ids, add=restored_ids)
 
+    def _record_syndrome_round_batch(self, merged_patches: list[Patch], targets: list[AtomId], bystanders: tuple[AtomId, ...] = ()):
+
+        counts = [_ancilla_weight_counts(p) for p in merged_patches]
+        int_total = sum(c[0] for c in counts)
+        bound_total = sum(c[1] for c in counts)
+        cz_duration = self.model.cz_duration_us
+
+        for step in range(4):
+                start_us = self._advance(targets, cz_duration)
+                active = int_total + (bound_total if step < 2 else 0)
+                self.Ng2 += active
+                self.Nxtalk += len(bystanders)
+                self.ops.append(ScheduleOp(
+                    kind="2q_substep", start_us=start_us, duration_us=cz_duration,
+                    targets=tuple(targets), detail={"substep": step, "active_gates": active}
+                ))
+    
+        measure_duration = 0.0 # FT-Weave assumes no MCM cost for ancilla measures (sus)
+        start_us = self._advance(targets, measure_duration)
+        self.Nmeas += int_total + bound_total
+        self.ops.append(ScheduleOp(
+            kind="mid_circuit_measure", start_us=start_us, duration_us=measure_duration,
+            targets=tuple(targets), detail={"num_ancilla": int_total + bound_total, "batch_size": len(merged_patches)}
+        ))
+
+    def record_merge_batch(self, placement: Placement, pairs: list[tuple[int, int]], *, rounds: int | None = None):
+
+        if not pairs: return []
+
+        unit_um = self.model.gate_pair_dist_um
+        all_removed_old_ids: list[AtomId] = []
+        needs_handover = False
+        new_removed_total = 0
+        batch_targets: list[AtomId] = []
+        batch_merged_patches: list[Patch] = []
+        batch_exclude: set[int] = set()
+        results = []
+
+        for q_a, q_b in pairs:
+            if q_a >= 0 and q_b >= 0: self.Ncnot += 1
+            else: self.Nt += 1
+
+            pa = next(p for p in placement.patches if p.qubit == q_a)
+            pb = next(p for p in placement.patches if p.qubit == q_b)
+            merged_patch, anchor, origin_qubit = merge_patches(placement, q_a, q_b)
+
+            before = {
+                pos for p in (pa, pb) for _, pos in p.patch.embed(p.anchor, unit_um)
+            }
+            after = {
+                pos for _, pos in merged_patch.embed(anchor, unit_um)
+            }
+
+            new_pos = after - before
+            removed = before - after
+
+            removed_old_ids = [
+                (p.qubit, atom.local)
+                for p in (pa, pb)
+                for atom, pos in p.patch.embed(p.anchor, unit_um)
+                if pos in removed
+            ]
+
+            if new_pos or removed:
+                needs_handover = True
+                all_removed_old_ids.extend(removed_old_ids)
+                new_removed_total += len(new_pos) + len(removed)
+
+            before_ids = {(q_a, a.local) for a in pa.patch.atoms} | {(q_b, b.local) for b in pb.patch.atoms}
+            after_ids = {(origin_qubit, a.local) for a in merged_patch.atoms}
+            self.retarget_atoms(remove=before_ids, add=after_ids)
+
+            batch_targets.extend(after_ids)
+            batch_merged_patches.append(merged_patch)
+            batch_exclude.add(q_a)
+            batch_exclude.add(q_b)
+            results.append((origin_qubit, merged_patch, anchor))
+
+        if needs_handover:
+            handover = self.model.handover_time_us
+            start_us = self._advance(all_removed_old_ids, 2 * handover)
+            self.Nh += 2 * new_removed_total
+            self.ops.append(ScheduleOp(
+                kind="merge_handover", start_us=start_us, duration_us=2 * handover,
+                targets=tuple(all_removed_old_ids), detail={"pairs": list(pairs)}
+            ))
+
+        batch_rounds = rounds if rounds is not None else max(p.distance for p in batch_merged_patches)
+        bystanders = self._entanglement_zone_bystanders(placement, exclude=batch_exclude)
+        for _ in range(batch_rounds):
+            self._record_syndrome_round_batch(batch_merged_patches, batch_targets, bystanders)
+
+        return results
+
+    def record_split_batch(self, splits: list[tuple[Patch, Position, int, Patch, Patch]]) -> None:
+
+        if not splits: return
+
+        unit_um = self.model.gate_pair_dist_um
+        all_removed_old_ids: list[AtomId] = []
+        new_removed_total = 0
+        needs_handover = False
+        retarget_removes: set[AtomId] = set()
+        retarget_adds: set[AtomId] = set()
+
+        for merged_patch, merged_anchor, origin_qubit, orig_a, orig_b in splits:
+
+            merged_pos = {pos for _, pos in merged_patch.embed(merged_anchor, unit_um)}
+            orig_pos = {pos for p in (orig_a, orig_b) for _, pos in p.patch.embed(p.anchor, unit_um)}
+            new_pos = orig_pos - merged_pos
+            removed_pos = merged_pos - orig_pos
+
+            removed_old_ids = [
+                (origin_qubit, atom.local)
+                for atom, pos in merged_patch.embed(merged_anchor, unit_um)
+                if pos in removed_pos
+            ]
+
+            if new_pos or removed_pos:
+                needs_handover = True
+                all_removed_old_ids.extend(removed_old_ids)
+                new_removed_total += len(new_pos) + len(removed_pos)
+
+            retarget_removes |= {(origin_qubit, a.local) for a in merged_patch.atoms}
+            retarget_adds |= (
+                {(orig_a.qubit, a.local) for a in orig_a.patch.atoms} |
+                {(orig_b.qubit, a.local) for a in orig_b.patch.atoms}
+            )
+
+        if needs_handover:
+            handover = self.model.handover_time_us
+            start_us = self._advance(all_removed_old_ids, 2 * handover)
+            self.Nh += 2 * new_removed_total
+            self.ops.append(ScheduleOp(
+                kind="split_handover", start_us=start_us, duration_us=2 * handover,
+                targets=tuple(all_removed_old_ids), detail={"batch_size": len(splits)}
+            ))
+
+        self.retarget_atoms(remove=retarget_removes, add=retarget_adds)
+
 def simulate_one_qubit_circuit(circuit: Circuit, placement: Placement, model: Model) -> Schedule:
 
     schedule = Schedule(model=model, all_atoms=tuple(_all_atom_ids(placement)))
