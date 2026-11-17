@@ -68,13 +68,16 @@ def simulate_circuit(circuit: Circuit, placement: Placement, model: Model, devic
                 schedule.record_move_round(lanes, current)
             current = target_placement
 
-            for gate in two_qubit_gates:
-                qa, qb = gate.qubits
-                origin_qubit, merged_patch, anchor = schedule.record_merge(current, qa, qb)
+            pairs = [gate.qubits for gate in two_qubit_gates]
+            merge_results = schedule.record_merge_batch(current, pairs)
+            splits =[]
+            for (qa, qb), (origin_qubit, merged_patch, anchor) in zip(pairs, merge_results):
+
                 pa = next(p for p in current.patches if p.qubit == qa)
                 pb = next(p for p in current.patches if p.qubit == qb)
+                splits.append((merged_patch, anchor, origin_qubit, pa, pb))
 
-                schedule.record_split(merged_patch, anchor, origin_qubit, pa, pb)
+            schedule.record_split_batch(splits)
 
         for op in schedule.ops[ops_before:]:
             op.detail["stage"] = stage_idx

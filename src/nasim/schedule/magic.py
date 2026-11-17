@@ -9,9 +9,11 @@ from nasim.device import Device
 from nasim.move import Move, legalise_frames, moves_between
 from nasim.placement import Placement, PlacedPatch
 from nasim.resource import Factory
-from nasim.schedule.core import Schedule, ScheduleOp, _data_atom_ids
+from nasim.schedule.core import Schedule, ScheduleOp, _data_atom_ids, _patch_atom_ids
 from nasim.schedule.routing import _nearest_free_zone_site, _retarget_pair_into_entanglement_zone, _legalise_by_zone
 from nasim.surface_code import Patch
+
+PRIORITY_WEIGHT = 1.0
 
 def _ensure_placed(current: Placement, zone, resource_id: int, distance: int, reference_anchor) -> Placement:
 
@@ -32,14 +34,43 @@ def _ensure_placed(current: Placement, zone, resource_id: int, distance: int, re
         qubit=resource_id, patch=patch, anchor=site
     ),))
 
-def _teleport_consume(current: Placement, device: Device, schedule: Schedule, qubit_a: int, qubit_b: int) -> Placement:
+def _cand_delivery_us(current: Placement, model, source_id: int, tgt_id: int) -> float:
+
+    a = next(p.anchor for p in current.patches if p.qubit == source_id)
+    b = next(p.anchor for p in current.patches if p.qubit == tgt_id)
+    return math.hypot(a.x - b.x, a.y - b.y) / model.v_xy_um_per_us
+
+def _best_other_source_us(current: Placement, schedule: Schedule, q: int, waiting_ids: set[int],
+                          busy_escape_us: dict[int, float], by_id: dict[int, Factory]) -> float | None:
+
+    """
+    Resource rematerialisation from FT-Weave. Estimate time until closest not ready factory could deliver instead
+    """
+
+    cands = []
+    for fid in waiting_ids:
+        remaining_check_us = max(0.0, by_id[fid].check_ready_us - schedule.clock_us)
+        est_escape_us = schedule.model.escape_cycles_for_distance(by_id[fid].distance) * schedule.model.qec_round_duration_us
+        cands.append(remaining_check_us + est_escape_us + _cand_delivery_us(current, schedule.model, fid, q))
+
+    for fid, finish_us in busy_escape_us.items():
+        cands.append(max(0.0, finish_us - schedule.clock_us) + _cand_delivery_us(current, schedule.model, fid, q))
+
+    return min(cands) if cands else None
+
+def _teleport_consume_batch(current: Placement, device: Device, schedule: Schedule, pairs: list[tuple[int, int]]) -> Placement:
 
     """
     Route two qubits next to each other in Ez and consume via surgery
     """
 
-    working, moves = _retarget_pair_into_entanglement_zone(current, device, qubit_a, qubit_b, [])
-    if moves:
+    working = current
+    all_moves = []
+    for q_a, q_b in pairs:
+        working, moves = _retarget_pair_into_entanglement_zone(working, device, q_a, q_b, all_moves)
+        all_moves.extend(moves)
+
+    if all_moves:
         realised = moves_between(current, working)
         moving_qubits = {m.qubit for m in realised}
         stationary = [p.anchor for p in current.patches if p.qubit not in moving_qubits]
@@ -47,11 +78,14 @@ def _teleport_consume(current: Placement, device: Device, schedule: Schedule, qu
         for lanes in rounds:
             schedule.record_move_round(lanes, current)
 
-    pa = next(p for p in working.patches if p.qubit == qubit_a)
-    pb = next(p for p in working.patches if p.qubit == qubit_b)
-    origin_qubit, merged_patch, anchor = schedule.record_merge(working, qubit_a, qubit_b)
-    schedule.record_split(merged_patch, anchor, origin_qubit, pa, pb)
+    merge_results = schedule.record_merge_batch(working, pairs)
+    splits = []
+    for (q_a, q_b), (origin_qubit, merged_patch, anchor) in zip(pairs, merge_results):
+        pa = next(p for p in working.patches if p.qubit == q_a)
+        pb = next(p for p in working.patches if p.qubit == q_b)
+        splits.append((merged_patch, anchor, origin_qubit, pa, pb))
 
+    schedule.record_split_batch(splits)
     return working
 
 def _return_to_zone(current: Placement, device: Device, schedule: Schedule, zone, resource_id: int) -> Placement:
@@ -83,7 +117,8 @@ def _return_to_zone(current: Placement, device: Device, schedule: Schedule, zone
         )
     )
 
-def _match_by_distance(current: Placement, a_ids: list[int], b_ids: list[int]) -> list[tuple[int, int]]:
+def _match_by_distance(current: Placement, a_ids: list[int], b_ids: list[int], *,
+                       priority_bonus_us: dict[int, float] | None = None) -> list[tuple[int, int]]:
 
     """
     Minimum-cost bipartite match. Used for check-stage redist and escape fact -> deliv
@@ -91,11 +126,13 @@ def _match_by_distance(current: Placement, a_ids: list[int], b_ids: list[int]) -
 
     k = min(len(a_ids), len(b_ids))
     if k == 0: return []
+    priority_bonus_us = priority_bonus_us or {}
 
     def pos(resource_id: int):
         return next(p.anchor for p in current.patches if p.qubit == resource_id)
 
-    cost = np.array([[math.hypot(pos(a).x - pos(b).x, pos(a).y - pos(b).y) for b in b_ids] for a in a_ids])
+    cost = np.array([[math.hypot(pos(a).x - pos(b).x, pos(a).y - pos(b).y) / current.model.v_xy_um_per_us - priority_bonus_us.get(b, 0.0) 
+                      for b in b_ids] for a in a_ids])
     row_ind, col_ind = linear_sum_assignment(cost)
     return [(a_ids[i], b_ids[j]) for i, j in zip(row_ind[:k], col_ind[:k])]
 
@@ -129,6 +166,7 @@ def _resolve_magic_requests(current: Placement, device: Device, schedule: Schedu
 
     by_id = {f.resource_id: f for f in factories}
     remaining = list(qubits)
+    waiting_since_us = {q: schedule.clock_us for q in remaining}
     waiting_ids = {f.resource_id for f in factories} # running check stage
     busy_escape_us: dict[int, float] = {} # time escape finishes
     pending_escape_outcome: dict[int, bool] = {} # escape success
@@ -136,24 +174,48 @@ def _resolve_magic_requests(current: Placement, device: Device, schedule: Schedu
 
     while remaining:
 
-        for fid, q in _match_by_distance(current, wait_for_rus_ids, remaining):
-            current = _teleport_consume(current, device, schedule, fid, q)
-            current = _return_to_zone(current, device, schedule, ent_zone, fid)
-            wait_for_rus_ids.remove(fid)
-            remaining.remove(q)
+        matched = _match_by_distance(current, wait_for_rus_ids, remaining,
+                                     priority_bonus_us={
+                                         q: PRIORITY_WEIGHT * (schedule.clock_us - waiting_since_us[q])
+                                         for q in remaining
+                                     })
 
-            if by_id[fid].rng.random() >= schedule.model.cultivation_teleportation_success_prob:
-                data_atoms = _data_atom_ids(current, q)
-                duration = schedule.model.single_qubit_duration_us
-                start_us = schedule._advance(data_atoms, duration)
-                schedule.Ng1 += len(data_atoms)
-                schedule.ops.append(ScheduleOp(
-                    kind="correction_gate", start_us=start_us, duration_us=duration,
-                    targets=tuple(data_atoms), detail={"qubits": [q]}
-                ))
+        to_deliver: list[tuple[int, int]] = []
+        for fid, q in matched:
+            now_us = _cand_delivery_us(current, schedule.model, fid, q)
+            alt_us = _best_other_source_us(current, schedule, q, waiting_ids, busy_escape_us, by_id)
 
-            by_id[fid].restart(now_us=schedule.clock_us)
-            waiting_ids.add(fid)
+            if alt_us is not None and alt_us < now_us:
+                by_id[fid].restart(now_us=schedule.clock_us)
+                waiting_ids.add(fid)
+                wait_for_rus_ids.remove(fid)
+                continue
+
+            to_deliver.append((fid, q))
+
+        if to_deliver:
+            current = _teleport_consume_batch(current, device, schedule, to_deliver)
+
+            for fid, q in to_deliver:
+                current = _return_to_zone(current, device, schedule, ent_zone, fid)
+                wait_for_rus_ids.remove(fid)
+                remaining.remove(q)
+                waiting_since_us.pop(q, None)
+
+                if by_id[fid].rng.random() >= schedule.model.cultivation_teleportation_success_prob:
+
+                    data_atoms = _data_atom_ids(current, q)
+                    duration = schedule.model.single_qubit_duration_us
+                    start_us = schedule._advance(data_atoms, duration)
+                    schedule.Ng1 += len(data_atoms)
+                    schedule.ops.append(ScheduleOp(
+                        kind="correction_gate", start_us=start_us,
+                        duration_us=duration, targets=tuple(data_atoms),
+                        detail={"qubits": [q]}
+                    ))
+
+                by_id[fid].restart(now_us=schedule.clock_us)
+                waiting_ids.add(fid)
 
         if not remaining: break
 
@@ -184,16 +246,38 @@ def _resolve_magic_requests(current: Placement, device: Device, schedule: Schedu
             receivers = [fid for fid in due_ids if not by_id[fid].passed_check()]
             donor_units = [fid for fid in due_ids for _ in range(by_id[fid].num_spare_successes())]
 
-            for recv_fid, donor_fid in _match_by_distance(current, receivers, donor_units):
+            all_redist_pairs = _match_by_distance(current, receivers, donor_units)
 
-                delay_us = _redistribution_delay_us(current, schedule.model, donor_fid, recv_fid)
-                start_us = schedule._advance([], delay_us)
+            # redist only worth it if moving cheaper than restart
+            m = schedule.model
+            fresh_restart_us = (
+                m.cultivation_check_cycles * m.qec_round_duration_us / m.cultivation_check_success_prob
+                + m.escape_cycles_for_distance(by_id[receivers[0]].distance if receivers else 0) 
+                * m.qec_round_duration_us
+            ) / m.cultivation_escape_success_prob
+
+            redist_pairs = [
+                (recv_fid, donor_fid) for recv_fid, donor_fid in all_redist_pairs
+                if _redistribution_delay_us(current, m, donor_fid, recv_fid) < fresh_restart_us
+            ]
+
+            if redist_pairs:
+                delays = {
+                    (recv_fid, donor_fid): _redistribution_delay_us(current, schedule.model, donor_fid, recv_fid)
+                    for recv_fid, donor_fid in redist_pairs
+                }
+                max_delay_us = max(delays.values())
+                involved_fids = {fid for pair in redist_pairs for fid in pair}
+                targets = [atom for fid in involved_fids for atom in _patch_atom_ids(current, fid)]
+                start_us = schedule._advance(targets, max_delay_us)
                 schedule.ops.append(ScheduleOp(
-                    kind="redistribution_delay", start_us=start_us, duration_us=delay_us,
-                    targets=(), detail={"donor": donor_fid, "receiver": recv_fid}
+                    kind="redistribution_delay", start_us=start_us, duration_us=max_delay_us,
+                    targets=tuple(targets), detail={"pairs": [{"donor": d, "receiver": r} for r, d in redist_pairs]}
                 ))
-                by_id[donor_fid].consume_one_success()
-                by_id[recv_fid].receive_donated_success()
+
+                for recv_id, donor_id in redist_pairs:
+                    by_id[donor_id].consume_one_success()
+                    by_id[recv_id].receive_donated_success()
 
             for fid in due_ids:
                 f = by_id[fid]

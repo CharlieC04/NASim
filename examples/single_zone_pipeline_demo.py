@@ -39,14 +39,21 @@ CNOT_ROUNDS = (TARGET_NCNOT // (NUM_QUBITS // 2))  # 8, each a disjoint-pair lay
 
 
 def build_circuit() -> Circuit:
-    stages = []
+    # Circuit.from_stages takes the given stage grouping as-is, with no
+    # compaction - feeding it a hand-rolled round-by-round list forces
+    # every op into its own artificially sequential round even though
+    # most have no actual dependency on each other. Circuit.from_gates is
+    # ZAP's real ASAP compaction (lay out 2Q gates as-soon-as-possible
+    # along their dependency chain, then bin-pack 1Q/magic-consume gates
+    # into the gaps) - same gate content, flat list instead of pre-staged.
+    gates = []
     for r in range(ROUNDS):
-        stages.append([one_qubit(q) for q in range(NUM_QUBITS)])
+        gates.extend(one_qubit(q) for q in range(NUM_QUBITS))
         if r < T_ROUNDS:
-            stages.append([magic_consume(q) for q in range(NUM_QUBITS)])
+            gates.extend(magic_consume(q) for q in range(NUM_QUBITS))
         if r < CNOT_ROUNDS:
-            stages.append([two_qubit(i, i + 1) for i in range(0, NUM_QUBITS, 2)])
-    return Circuit.from_stages(NUM_QUBITS, stages)
+            gates.extend(two_qubit(i, i + 1) for i in range(0, NUM_QUBITS, 2))
+    return Circuit.from_gates(NUM_QUBITS, gates)
 
 
 def main() -> None:
@@ -59,7 +66,7 @@ def main() -> None:
     t0 = time.monotonic()
     placement = zap_placement(circuit, model, device, distance=DISTANCE)
     factories = [
-        Factory(resource_id=-(i + 1), model=model, rng=random.Random(i), distance=DISTANCE, num_subfactories=3)
+        Factory(resource_id=-(i + 1), model=model, rng=random.Random(i), distance=DISTANCE, num_subfactories=2)
         for i in range(NUM_FACTORIES)
     ]
 

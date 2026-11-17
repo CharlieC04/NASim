@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import itertools
 
 from nasim.device import Device
 from nasim.geometry import Position
@@ -200,7 +201,9 @@ def _retarget_pair_into_entanglement_zone(placement: Placement, device: Device, 
 def _legalise_by_zone(moves: list[Move], stationary: list[Position], device: Device | None) -> list[list[list[Move]]]:
 
     """
-    Partition moves by zone bound for and legalise zone's moves indep.
+    Partition moves by zone bound for and legalise each zone's moves indep,
+    then merge the per-zone rounds concurrently (round i of every zone runs
+    together) rather than concatenating zones sequentially.
     """
 
     if device is None or not device.zones:
@@ -215,14 +218,20 @@ def _legalise_by_zone(moves: list[Move], stationary: list[Position], device: Dev
         zone = zone_for(move)
         key = zone.name if zone is not None else "__unzoned__"
         num_aods = zone.num_aods if zone is not None else 1
+
         if key not in groups:
             groups[key] = (num_aods, [])
             order.append(key)
         groups[key][1].append(move)
 
-    rounds: list[list[list[Move]]] = []
-    for key in order:
-        num_aods, group_moves = groups[key]
-        rounds.extend(legalise_frames(group_moves, stationary, num_aods=num_aods))
+    per_round_groups = [
+        legalise_frames(groups[key][1], stationary, num_aods=groups[key][0])
+        for key in order
+    ]
 
-    return rounds
+    combined: list[list[list[Move]]] = []
+    for rounds_at_index in itertools.zip_longest(*per_round_groups, fillvalue=[]):
+        merged_lanes = [lane for group_round in rounds_at_index for lane in group_round]
+        combined.append(merged_lanes)
+
+    return combined

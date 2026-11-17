@@ -26,7 +26,7 @@ from nasim.schedule.idle import (
 )
 from nasim.schedule.magic import (
     _ensure_placed,
-    _teleport_consume,
+    _teleport_consume_batch,
     _return_to_zone,
     _match_by_distance,
     _resolve_magic_requests,
