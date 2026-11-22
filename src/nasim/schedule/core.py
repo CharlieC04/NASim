@@ -66,11 +66,13 @@ class Schedule:
     Nt: int = 0
 
     idle_us: dict[AtomId, float] = field(default_factory=dict)
+    track_idle: bool = True
 
     def __post_init__(self) -> None:
         self.all_atoms = set(self.all_atoms)
-        for atom in self.all_atoms:
-            self.idle_us.setdefault(atom, 0.0)
+        if self.track_idle:
+            for atom in self.all_atoms:
+                self.idle_us.setdefault(atom, 0.0)
 
     def _entanglement_zone_bystanders(self, placement: Placement, exclude: set[int]) -> tuple[AtomId, ...]:
 
@@ -90,9 +92,8 @@ class Schedule:
     def _advance(self, targets: list[AtomId], duration_us: float) -> float:
 
         start_us = self.clock_us
-        target_set = set(targets)
-        for atom in self.all_atoms:
-            if atom not in target_set:
+        if self.track_idle:
+            for atom in self.all_atoms.difference(targets):
                 self.idle_us[atom] += duration_us
 
         self.clock_us = start_us + duration_us
@@ -104,7 +105,8 @@ class Schedule:
             self.all_atoms.discard(atom)
         for atom in add:
             self.all_atoms.add(atom)
-            self.idle_us.setdefault(atom, 0.0)
+            if self.track_idle:
+                self.idle_us.setdefault(atom, 0.0)
 
     def record_1q_stage(self, circuit: Circuit, stage_idx: int, placement: Placement) -> None:
 

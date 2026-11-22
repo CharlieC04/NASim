@@ -12,10 +12,10 @@ from nasim.schedule.magic import _resolve_magic_requests
 from nasim.schedule.routing import _retarget_adjacent, _retarget_pair_into_entanglement_zone, _legalise_by_zone
 
 def simulate_circuit(circuit: Circuit, placement: Placement, model: Model, device: Device | None = None,
-                     factories: list[Factory] | None = None) -> tuple[Schedule, Placement]:
+                     factories: list[Factory] | None = None, *, track_idle: bool = True) -> tuple[Schedule, Placement]:
 
 
-    schedule = Schedule(model=model, all_atoms=set(_all_atom_ids(placement)), device=device)
+    schedule = Schedule(model=model, all_atoms=set(_all_atom_ids(placement)), device=device, track_idle=track_idle)
     current = placement
 
     for stage_idx, stage in enumerate(circuit.stages):

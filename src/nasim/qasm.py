@@ -4,7 +4,7 @@ from pathlib import Path
 from qiskit import QuantumCircuit, transpile
 from qiskit_qasm3_import import parse
 
-from nasim.circuit import Gate, one_qubit, two_qubit
+from nasim.circuit import Gate, one_qubit, two_qubit, magic_consume
 
 def load_transpiled_circuit(path: str | Path) -> tuple[int, list[Gate]]:
 
@@ -48,3 +48,32 @@ def load_transpiled_circuit(path: str | Path) -> tuple[int, list[Gate]]:
             gates.append(one_qubit(q))
 
     return cz_cirq.num_qubits, gates
+
+_CLIFFORD_RY_ANGLES = (1.5707963267948966, -1.5707963267948966)
+_ONE_QUBIT_NAMES = {"h", "s", "sdg", "x", "y", "z", "sx", "sxdg", "id"}
+_TWO_QUBIT_NAMES = {"cx", "cz"}
+_MAGIC_NAMES = {"t", "tdg"}
+_SKIP_NAMES = {"measure", "barrier"}
+
+def load_clifford_t_circuit(path: str | Path) -> tuple[int, list[Gate]]:
+
+    path = Path(path)
+    qasm_str = path.read_text()
+
+    circuit = QuantumCircuit.from_qasm_str(qasm_str)
+
+    gates: list[Gate] = []
+    for instr in circuit.data:
+        name = instr.operation.name
+        qubits = [circuit.find_bit(q).index for q in instr.qubits]
+
+        if name in _SKIP_NAMES: continue
+        elif name in _MAGIC_NAMES: gates.append(magic_consume(qubits[0]))
+        elif name in _TWO_QUBIT_NAMES: gates.append(two_qubit(qubits[0], qubits[1]))
+        elif name in _ONE_QUBIT_NAMES: gates.append(one_qubit(qubits[0]))
+        elif name == "ry":
+            angle = float(instr.operation.params[0])
+            if not any(abs(angle - a) < 1e-6 for a in _CLIFFORD_RY_ANGLES): raise ValueError("non-clifford ry")
+            gates.append(one_qubit(qubits[0]))
+
+    return circuit.num_qubits, gates

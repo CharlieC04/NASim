@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from nasim.schedule.core import AtomId, Schedule, ScheduleOp
+from nasim.schedule.qldpc_memory import MemoryBlock, MemoryOccupancy
+
 # using qSIEVE table 4
 LOAD_LOGICAL_CYCLES = 2
 STORE_LOGICAL_CYCLES = 1
@@ -40,3 +43,104 @@ class LoadStoreAncilla:
             raise ValueError('finish called before op done')
 
         self.in_flight_qubit = None
+
+def _check_ancilla_matches(ancilla: LoadStoreAncilla, block: MemoryBlock) -> None:
+    if ancilla.memory_block_id != block.block_id:
+        raise ValueError("block id no match")
+
+def record_load(schedule: Schedule, block: MemoryBlock, occupancy: MemoryOccupancy, 
+                ancilla: LoadStoreAncilla, *, slot: int, code_distance: int) -> int:
+
+    """
+    Move program qubit in slot out of mem and into compute. Have one-aat-block contraint
+    """
+
+    _check_ancilla_matches(ancilla, block)
+    if not ancilla.is_free(schedule.clock_us):
+        raise ValueError("LD/ST ancilla busy")
+
+    program_qubit = occupancy.slots.get(slot)
+    if program_qubit is None:
+        raise ValueError("slot empty")
+
+    duration_us = load_duration_us(schedule.model.qec_round_duration_us, code_distance)
+    targets: list[AtomId] = block.atom_ids()
+    start_us = schedule._advance(targets, duration_us)
+
+    ancilla.begin(qubit=program_qubit, now_us=start_us, duration_us=duration_us)
+    ancilla.finish(schedule.clock_us)
+    occupancy.evict(slot)
+
+    schedule.ops.append(ScheduleOp(
+        kind="ldst_load", start_us=start_us, duration_us=duration_us,
+        targets=tuple(targets), detail={"block_id": block.block_id, "slot": slot, "qubit": program_qubit}
+    ))
+
+    return program_qubit
+
+def record_store(schedule: Schedule, block: MemoryBlock, occupancy: MemoryOccupancy,
+                 ancilla: LoadStoreAncilla, *, slot: int, program_qubit: int, code_distance: int) -> None:
+
+    """
+    Move qubit from compute to memory
+    """
+
+    _check_ancilla_matches(ancilla, block)
+    if not ancilla.is_free(schedule.clock_us):
+        raise ValueError("LD/ST ancilla busy")
+
+    duration_us = store_duration_us(schedule.model.qec_round_duration_us, code_distance)
+    targets: list[AtomId] = block.atom_ids()
+    start_us = schedule._advance(targets, duration_us)
+
+    ancilla.begin(qubit=program_qubit, now_us=start_us, duration_us=duration_us)
+    ancilla.finish(schedule.clock_us)
+    occupancy.store(slot, program_qubit)
+
+    schedule.ops.append(ScheduleOp(
+        kind="ldst_store", start_us=start_us, duration_us=duration_us,
+        targets=tuple(targets), detail={"block_id": block.block_id, "slot": slot, "qubit": program_qubit}
+    ))
+
+def record_ldst_wave(schedule: Schedule, block_seqs: list[list[tuple]], *, code_dist: int):
+
+    """
+    Dispatch LD/ST seq in waves, since share AOD across blocks
+    """
+
+    block_seqs = [seq for seq in block_seqs if seq]
+    if not block_seqs: return
+
+    def op_dur(kind: str) -> float:
+        fn = load_duration_us if kind == "load" else store_duration_us
+        return fn(schedule.model.qec_round_duration_us, code_dist)
+
+    wave_start = schedule.clock_us
+    all_tgts: list[AtomId] = []
+    dispatch: list[tuple[float, float, str, MemoryBlock, MemoryOccupancy, LoadStoreAncilla, int, int]] = []
+    max_end = wave_start
+
+    for seq in block_seqs:
+        t = wave_start
+        for kind, block, occupancy, ancilla, slot, qubit in seq:
+            _check_ancilla_matches(ancilla, block)
+            if not ancilla.is_free(t): raise ValueError("ancilla busy")
+
+            d = op_dur(kind)
+            dispatch.append((t, d, kind, block, occupancy, ancilla, slot, qubit))
+            all_tgts.extend(block.atom_ids())
+            t += d
+        max_end = max(max_end, t)
+
+    schedule._advance(all_tgts, max_end - wave_start)
+
+    for start_us, d, kind, block, occupancy, ancilla, slot, qubit in dispatch:
+        ancilla.begin(qubit=qubit, now_us=start_us, duration_us=d)
+        ancilla.finish(start_us+d)
+        if kind == "load": occupancy.evict(slot)
+        else: occupancy.store(slot, qubit)
+
+        schedule.ops.append(ScheduleOp(
+            kind=f"ldst_{kind}", start_us=start_us, duration_us=d, targets=tuple(block.atom_ids()),
+            detail={"block_id": block.block_id, "slot": slot, "qubit": qubit}
+        ))
