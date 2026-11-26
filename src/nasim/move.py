@@ -18,13 +18,19 @@ class Move:
     def distance_um(self) -> float:
         return math.hypot(self.target.x - self.source.x, self.target.y - self.source.y)
 
+    def axial_distance_um(self) -> float:
+        return abs(self.target.z - self.source.z)
+
 def move_duration_us(move: Move, model: Model) -> float:
     
     """
     Min-jerk movement from Piqasso
     """
 
-    return (15/8) * (move.distance_um() / model.v_xy_um_per_us)
+    if model.v_z_um_per_us > 0:
+        return (15/8) * (move.distance_um() / model.v_xy_um_per_us + move.axial_distance_um() / model.v_z_um_per_us)
+    else:
+        return (15/8) * (move.distance_um() / model.v_xy_um_per_us)
 
 def conflict_reason(a: Move, b: Move) -> tuple[str, str] | None:
 
@@ -32,6 +38,9 @@ def conflict_reason(a: Move, b: Move) -> tuple[str, str] | None:
     both axes: "shared_source" (same start, diverging ends), 
     "shared_target" (same end, diverging starts), or
     "crossing" (trajectories overlap in between)."""
+
+    # Moves at different heights can't have AOD conflicts
+    if len({a.source.z, a.target.z, b.source.z, b.target.z}) > 1: return None
 
     checks = (
         (a.source.x, a.target.x, b.source.x, b.target.x, "x"),

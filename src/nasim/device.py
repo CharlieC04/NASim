@@ -52,6 +52,7 @@ def _slm_padded_bbox(slm: SLM) -> tuple[float, float, float, float]:
     return min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
 
 def _slms_overlap(a: SLM, b: SLM) -> bool:
+    if a.origin.z != b.origin.z: return False
     ax0, ay0, ax1, ay1 = _slm_bbox(a)
     bx0, by0, bx1, by1 = _slm_bbox(b)
     return ax0 <= bx1 and bx0 <= ax1 and ay0 <= by1 and by0 <= ay1
@@ -80,6 +81,7 @@ class Zone:
     def contains(self, pos: Position) -> bool:
 
         for slm in self.slms:
+            if slm.origin.z != pos.z: continue
             x0, y0, x1, y1 = _slm_padded_bbox(slm)
             if x0 <= pos.x <= x1 and y0 <= pos.y <= y1: return True
         return False
@@ -125,7 +127,9 @@ class Device:
     @classmethod
     def zoned(cls, model: Model, *, storage_rows: int, storage_cols: int, storage_pitch_um: float,
               entanglement_rows: int, entanglement_cols: int, entanglement_pitch: float, gap_um: float = 10.0,
-              storage_num_aods: int = 1, entanglement_num_aods: int = 1):
+              storage_num_aods: int = 1, entanglement_num_aods: int = 1,
+              factory_rows: int | None = None, factory_cols: int | None = None,
+              factory_pitch_um: float | None = None, factory_num_aods: int = 1):
 
         """Build a two-zone device: a storage grid with the entanglement
         grid placed directly above it, separated by gap_um."""
@@ -138,12 +142,50 @@ class Device:
         if _slms_overlap(storage, entanglement):
             raise ValueError("Zones overlap")
 
-        zones = (
+        slms = [storage, entanglement]
+        zones = [
             Zone(name="storage", kind="storage", slms=(storage,), num_aods=storage_num_aods),
             Zone(name="entanglement", kind="entanglement", slms=(entanglement,), num_aods=entanglement_num_aods)
+        ]
+
+        if factory_rows is not None:
+            entanglement_height = (entanglement_rows - 1) * entanglement_pitch
+            factory = SLM(rows=factory_rows, cols=factory_cols, pitch_x_um=factory_pitch_um,
+                          pitch_y_um=factory_pitch_um, origin=Position(0.0, storage_height + 
+                                                                       gap_um + entanglement_height + gap_um, 0.0))
+            if _slms_overlap(entanglement, factory) or _slms_overlap(factory, storage):
+                raise ValueError("zones overlap")
+
+            slms.append(factory)
+            zones.append(Zone(name="factory", kind="factory", slms=(factory,), num_aods=factory_num_aods))
+
+        return cls(model=model, slms=tuple(slms), zones=tuple(zones))
+
+    @classmethod
+    def layered(cls, model: Model, *, memory_rows: int, memory_cols: int, memory_pitch_um: float,
+                compute_rows: int, compute_cols: int, compute_pitch_um: float,
+                factory_rows: int, factory_cols: int, factory_pitch_um: float,
+                layer_spacing_um: float | None = None, memory_num_aods: int = 1,
+                compute_num_aods: int = 1, factory_num_aods: int = 1) -> Device:
+
+        spacing = model.layer_spacing_um if layer_spacing_um is None else layer_spacing_um
+        if spacing < model.axial_clearance_um:
+            raise ValueError("layer clearance too small")
+
+        memory = SLM(rows=memory_rows, cols=memory_cols, pitch_x_um=memory_pitch_um,
+                     pitch_y_um=memory_pitch_um, origin=Position(0.0, 0.0, 0.0))
+        compute = SLM(rows=compute_rows, cols=compute_cols, pitch_x_um=compute_pitch_um,
+                      pitch_y_um=compute_pitch_um, origin=Position(0.0, 0.0, spacing))
+        factory = SLM(rows=factory_rows, cols=factory_cols, pitch_x_um=factory_pitch_um,
+                      pitch_y_um=factory_pitch_um, origin=Position(0.0, 0.0, 2 * spacing))
+
+        zones = (
+            Zone(name="storage", kind="storage", slms=(memory,), num_aods=memory_num_aods),
+            Zone(name="entanglement", kind="entanglement", slms=(compute,), num_aods=compute_num_aods),
+            Zone(name="factory", kind="factory", slms=(factory,), num_aods=factory_num_aods),
         )
 
-        return cls(model=model, slms=(storage, entanglement), zones=zones)
+        return cls(model=model, slms=(memory, compute, factory), zones=zones)
 
     @classmethod
     def from_yaml(cls, path: str | Path, model: Model) -> Device:
@@ -193,6 +235,7 @@ class Device:
         best = math.inf
         for i in range(len(sites)):
             for j in range(i + 1, len(sites)):
+                if sites[i].z != sites[j].z: continue
                 d = math.dist((sites[i].x, sites[i].y), (sites[j].x, sites[j].y))
                 best = min(d, best)
 

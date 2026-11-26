@@ -23,10 +23,12 @@ class Model:
 
     #transport
     v_xy_um_per_us: float
+    v_z_um_per_us: float
     v_loss_um_per_us: float
     handover_time_us: float
     handover_fidelity: float
     move_profile: str
+    axial_clearance_um: float
 
     # addressing
     addressing: dict[str, Any]
@@ -97,10 +99,12 @@ class Model:
             gate_pair_dist_um=geometry["gate_pair_dist_um"],
             blockade_radius_um=interaction["blockade_radius_um"],
             v_xy_um_per_us=transport["v_xy_um_per_us"],
+            v_z_um_per_us=transport.get("v_z_um_per_us", 0.0),
             v_loss_um_per_us=transport["v_loss_um_per_us"],
             handover_time_us=transport["handover_time_us"],
             handover_fidelity=transport["handover_fidelity"],
             move_profile=transport["move_profile"],
+            axial_clearance_um=transport.get("axial_clearance_um", 0.0),
             addressing=data["addressing"],
             readout_fidelity=readout["fidelity"],
             readout_time_us=readout["time_us"],

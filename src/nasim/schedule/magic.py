@@ -160,9 +160,12 @@ def _resolve_magic_requests(current: Placement, device: Device, schedule: Schedu
         raise ValueError("Device has no entanglement zone")
     ent_zone = ent_zones[0]
 
+    factory_zones = [z for z in device.zones if z.kind == "factory"]
+    resource_zone = factory_zones[0] if factory_zones else ent_zone
+
     reference_anchor = next(p.anchor for p in current.patches if p.qubit == qubits[0])
     for f in factories:
-        current = _ensure_placed(current, ent_zone, f.resource_id, f.distance, reference_anchor)
+        current = _ensure_placed(current, resource_zone, f.resource_id, f.distance, reference_anchor)
 
     by_id = {f.resource_id: f for f in factories}
     remaining = list(qubits)
@@ -197,7 +200,7 @@ def _resolve_magic_requests(current: Placement, device: Device, schedule: Schedu
             current = _teleport_consume_batch(current, device, schedule, to_deliver)
 
             for fid, q in to_deliver:
-                current = _return_to_zone(current, device, schedule, ent_zone, fid)
+                current = _return_to_zone(current, device, schedule, resource_zone, fid)
                 wait_for_rus_ids.remove(fid)
                 remaining.remove(q)
                 waiting_since_us.pop(q, None)
