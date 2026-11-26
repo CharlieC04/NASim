@@ -31,7 +31,8 @@ fidelity = [
     "stim>=1.16",
     "pymatching>=2.4",
     "ldpc>=2.4",
-    "sinter>=1.16"
+    "sinter>=1.16",
+    "tqec"
 ]
 
 [tool.hatch.build.targets.wheel]

@@ -135,4 +135,5 @@ def simulate_qldpc_circuit(
         for op in schedule.ops[ops_before:]:
             op.detail["stage"] = stage_idx
 
+    schedule.finalize_idle()
     return schedule, current, assignment, occupancies, residency

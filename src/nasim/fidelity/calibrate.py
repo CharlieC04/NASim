@@ -5,7 +5,8 @@ from dataclasses import dataclass
 import numpy as np
 
 from nasim.fidelity.circuits import gen_bicycle_memory_circuit, surface_code_memory_circuit
-from nasim.fidelity.decoders import decode_gen_bicycle_xz_split, decode_batch_matching
+from nasim.fidelity.decoders import build_gen_bicycle_xz_decoder, decode_with_prebuilt_decoder, decode_batch_matching
+from nasim.fidelity.circuits_tqec import merge_split_circuit
 from nasim.qldpc import GenBicycleCode
 
 @dataclass
@@ -37,9 +38,20 @@ def calibrate_gen_bicycle_code(code: GenBicycleCode, *, p_phys: float, rounds: i
     sampler = circuit.compile_detector_sampler()
     decode_kwargs = dict(max_iter=30, osd_order=0) if fast else dict(max_iter=1000, osd_order=10)
 
+    # Built once per circuit -- the DEM walk + BpOsdDecoder construction
+    # this does is the dominant cost (~11.5s for BB_144_12_12 at 12
+    # rounds), and it only depends on the circuit, not on which shots get
+    # decoded. Rebuilding it per batch (as calling decode_gen_bicycle_xz_split
+    # directly in the loop below used to do) multiplies that cost by the
+    # number of batches for no benefit.
+    decoder, relevant_arr, obs_matrix = build_gen_bicycle_xz_decoder(circuit, basis_coord=basis_coord, **decode_kwargs)
+
+    def decode(detection_events: np.ndarray) -> np.ndarray:
+        return decode_with_prebuilt_decoder(decoder, relevant_arr, obs_matrix, detection_events)
+
     if shots is not None:
         detection_events, observable_flips = sampler.sample(shots=shots, separate_observables=True)
-        predicted = decode_gen_bicycle_xz_split(circuit, detection_events, basis_coord=basis_coord, **decode_kwargs)
+        predicted = decode(detection_events)
         n_errors = int(np.sum(np.any(predicted != observable_flips, axis=1)))
         return CalibrationResult(p_phys=p_phys, rounds=rounds, shots=shots, n_errors=n_errors)
 
@@ -49,7 +61,7 @@ def calibrate_gen_bicycle_code(code: GenBicycleCode, *, p_phys: float, rounds: i
     while total_errors < target_errors and total_shots < max_shots:
         this_batch = min(batch, max_shots - total_shots)
         detection_events, observable_flips = sampler.sample(shots=this_batch, separate_observables=True)
-        predicted = decode_gen_bicycle_xz_split(circuit, detection_events, basis_coord=basis_coord, **decode_kwargs)
+        predicted = decode(detection_events)
         total_errors += int(np.sum(np.any(predicted != observable_flips, axis=1)))
         total_shots += this_batch
 
@@ -66,3 +78,14 @@ def calibrate_surface_code(*, distance: int, p_phys: float, rounds: int, shots: 
     predicted = decode_batch_matching(dem, detection_events)
     n_errors = int(np.sum(np.any(predicted != observable_flips, axis=1)))
     return CalibrationResult(p_phys=p_phys, rounds=rounds, shots=shots, n_errors=n_errors)
+
+def calibrate_merge_split(*, k: int, p_phys: float, shots: int, basis: str = "Z") -> CalibrationResult:
+
+    circuit = merge_split_circuit(k=k, p=p_phys, basis=basis)
+    dem = circuit.detector_error_model(decompose_errors=True)
+    sampler = circuit.compile_detector_sampler()
+    detection_events, observable_flips = sampler.sample(shots=shots, separate_observables=True)
+
+    predicted = decode_batch_matching(dem, detection_events)
+    n_errors = int(np.sum(np.any(predicted != observable_flips, axis=1)))
+    return CalibrationResult(p_phys=p_phys, rounds=1, shots=shots, n_errors=n_errors)

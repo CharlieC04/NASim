@@ -82,4 +82,5 @@ def simulate_circuit(circuit: Circuit, placement: Placement, model: Model, devic
         for op in schedule.ops[ops_before:]:
             op.detail["stage"] = stage_idx
 
+    schedule.finalize_idle()
     return schedule, current

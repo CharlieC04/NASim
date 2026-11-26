@@ -71,11 +71,19 @@ def decode_batch_matching(dem: stim.DetectorErrorModel, detection_events: np.nda
     matcher = pymatching.Matching.from_detector_error_model(dem)
     return matcher.decode_batch(detection_events)
 
-def decode_gen_bicycle_xz_split(circuit: stim.Circuit, detection_events: np.ndarray, *, basis_coord: int, max_iter: int = 300,
-                                osd_order: int = 10, bp_method: str = "minimum_sum"):
+def build_gen_bicycle_xz_decoder(circuit: stim.Circuit, *, basis_coord: int, max_iter: int = 300,
+                                 osd_order: int = 10, bp_method: str = "minimum_sum"):
 
     """
-    BP+OSD decoding doing X/Z in seq, following QS
+    One-time setup for decode_gen_bicycle_xz_split: builds the DEM, walks
+    every mechanism to build the check/observable matrices, and
+    constructs the BpOsdDecoder. This is the expensive part (the DEM walk
+    alone is a pure-Python loop over every mechanism -- ~11.5s for
+    BB_144_12_12 at 12 rounds) and depends only on the circuit, not on
+    which shots get decoded -- so callers doing many batches against the
+    SAME circuit (e.g. calibrate_gen_bicycle_code's adaptive loop) should
+    call this once and reuse the result via decode_with_prebuilt_decoder,
+    not call decode_gen_bicycle_xz_split per batch.
     """
 
     dem = circuit.detector_error_model(decompose_errors=False)
@@ -120,6 +128,14 @@ def decode_gen_bicycle_xz_split(circuit: stim.Circuit, detection_events: np.ndar
     )
 
     relevant_arr = np.array(relevant, dtype=int)
+    return decoder, relevant_arr, obs_matrix
+
+
+def decode_with_prebuilt_decoder(decoder, relevant_arr: np.ndarray, obs_matrix: np.ndarray,
+                                 detection_events: np.ndarray) -> np.ndarray:
+
+    """Decode a batch of shots using a decoder already built by build_gen_bicycle_xz_decoder."""
+
     sub_events = detection_events[:, relevant_arr]
     shots = sub_events.shape[0]
     predicted = np.zeros((shots, obs_matrix.shape[0]), dtype=np.uint8)
@@ -128,3 +144,23 @@ def decode_gen_bicycle_xz_split(circuit: stim.Circuit, detection_events: np.ndar
         predicted[i] = (obs_matrix @ pred_errors) % 2
 
     return predicted
+
+
+def decode_gen_bicycle_xz_split(circuit: stim.Circuit, detection_events: np.ndarray, *, basis_coord: int, max_iter: int = 300,
+                                osd_order: int = 10, bp_method: str = "minimum_sum"):
+
+    """
+    BP+OSD decoding doing X/Z in seq, following QS.
+
+    Convenience one-shot wrapper (build + decode together) -- for
+    anything that calls this more than once against the same circuit,
+    call build_gen_bicycle_xz_decoder once and decode_with_prebuilt_decoder
+    per batch instead; this function rebuilds the decoder from scratch
+    every call, which is fine for a single decode but very wasteful
+    across repeated batches (see build_gen_bicycle_xz_decoder's docstring).
+    """
+
+    decoder, relevant_arr, obs_matrix = build_gen_bicycle_xz_decoder(
+        circuit, basis_coord=basis_coord, max_iter=max_iter, osd_order=osd_order, bp_method=bp_method,
+    )
+    return decode_with_prebuilt_decoder(decoder, relevant_arr, obs_matrix, detection_events)
