@@ -35,3 +35,11 @@ def logical_error_rate(op: str, p_ph: float, d: int) -> float:
 
 def logical_fidelity(op: str, p_ph: float, d: int) -> float:
     return 1.0 - logical_error_rate(op, p_ph, d)
+
+def qldpc_held_fidelity(n_rounds: int, eps_mem: float) -> float:
+
+    return (1.0 - eps_mem) ** n_rounds
+
+def qldpc_max_rounds_held(eps_mem: float, min_fidel: float) -> int:
+
+    return math.floor(math.log(min_fidel) / math.log(1.0 - eps_mem))

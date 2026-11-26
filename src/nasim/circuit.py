@@ -108,6 +108,22 @@ class Circuit:
 
         return cls(num_qubits, tuple(tuple(s) for s in stages))
 
+    def with_separated_magic_stages(self) -> Circuit:
+
+        new_stages: list[list[Gate]] = []
+        for stage in self.stages:
+            magic = [g for g in stage if g.type is GateType.MAGIC_CONSUME]
+            rest = [g for g in stage if g.type is not GateType.MAGIC_CONSUME]
+            if magic and rest:
+                new_stages.append(magic)
+                new_stages.append(rest)
+            elif magic:
+                new_stages.append(magic)
+            elif rest:
+                new_stages.append(rest)
+
+        return Circuit.from_stages(self.num_qubits, new_stages)
+
     def two_qubit_gates(self):
 
         for i, stage in enumerate(self.stages):

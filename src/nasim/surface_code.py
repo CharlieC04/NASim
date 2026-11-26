@@ -38,12 +38,15 @@ class Patch:
     def num_ancilla(self) -> int:
         return sum(1 for a in self.atoms if a.role != AtomRole.DATA)
 
+    def __post_init__(self) -> None:
+        xs = [a.local[0] for a in self.atoms]
+        ys = [a.local[1] for a in self.atoms]
+        object.__setattr__(self, "_local_bounds", (min(xs), min(ys), max(xs), max(ys)))
+
     @property
     def local_bounds(self) -> tuple[int, int, int, int]:
 
-        xs = [a.local[0] for a in self.atoms]
-        ys = [a.local[1] for a in self.atoms]
-        return min(xs), min(ys), max(xs), max(ys)
+        return self._local_bounds
 
     def radius_um(self, unit_um: float) -> float:
 

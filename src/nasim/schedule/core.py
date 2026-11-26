@@ -66,11 +66,22 @@ class Schedule:
     Nt: int = 0
 
     idle_us: dict[AtomId, float] = field(default_factory=dict)
+    track_idle: bool = True
+
+    # Lazy idle-time bookkeeping: for each atom, the clock_us value up to
+    # which idle_us[atom] has already been flushed. _advance/retarget_atoms
+    # only touch atoms in `targets`/`remove`/`add` (O(len(targets)), not
+    # O(len(all_atoms))) -- the gap for every other atom accumulates
+    # implicitly and gets flushed the next time that atom is targeted,
+    # removed, or finalize_idle() is called. See _advance's docstring.
+    _idle_synced_us: dict[AtomId, float] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         self.all_atoms = set(self.all_atoms)
-        for atom in self.all_atoms:
-            self.idle_us.setdefault(atom, 0.0)
+        if self.track_idle:
+            for atom in self.all_atoms:
+                self.idle_us.setdefault(atom, 0.0)
+                self._idle_synced_us.setdefault(atom, 0.0)
 
     def _entanglement_zone_bystanders(self, placement: Placement, exclude: set[int]) -> tuple[AtomId, ...]:
 
@@ -89,22 +100,62 @@ class Schedule:
 
     def _advance(self, targets: list[AtomId], duration_us: float) -> float:
 
-        start_us = self.clock_us
-        target_set = set(targets)
-        for atom in self.all_atoms:
-            if atom not in target_set:
-                self.idle_us[atom] += duration_us
+        """
+        Advances the clock. Atoms in `targets` are busy for this interval
+        (not idle) -- rather than iterate every OTHER atom in all_atoms
+        (O(len(all_atoms)), the dominant cost for large circuits with
+        many qLDPC-memory atoms), this flushes each targeted atom's
+        pending idle gap up to the start of this interval, then jumps its
+        sync pointer past the interval. Atoms NOT targeted this call are
+        untouched -- their gap grows implicitly and is flushed next time
+        they're targeted, removed (retarget_atoms), or at
+        finalize_idle(). See Schedule's _idle_synced_us field.
+        """
 
-        self.clock_us = start_us + duration_us
+        start_us = self.clock_us
+        end_us = start_us + duration_us
+        if self.track_idle:
+            for atom in set(targets):
+                synced = self._idle_synced_us.get(atom, start_us)
+                self.idle_us[atom] = self.idle_us.get(atom, 0.0) + (start_us - synced)
+                self._idle_synced_us[atom] = end_us
+
+        self.clock_us = end_us
         return start_us
 
+    def finalize_idle(self) -> None:
+
+        """
+        Flushes every still-active atom's pending idle gap up to the
+        current clock. _advance/retarget_atoms update idle_us lazily
+        (only for atoms actually touched, not every atom on every op) --
+        call this once after scheduling is complete, before reading
+        idle_us, to bring every atom (including ones never targeted again
+        after some point) up to date. Idempotent.
+        """
+
+        if not self.track_idle:
+            return
+        for atom in self.all_atoms:
+            synced = self._idle_synced_us.get(atom, self.clock_us)
+            self.idle_us[atom] = self.idle_us.get(atom, 0.0) + (self.clock_us - synced)
+            self._idle_synced_us[atom] = self.clock_us
+
     def retarget_atoms(self, remove: set[AtomId], add: set[AtomId]) -> None:
+
+        if self.track_idle:
+            for atom in remove:
+                synced = self._idle_synced_us.get(atom, self.clock_us)
+                self.idle_us[atom] = self.idle_us.get(atom, 0.0) + (self.clock_us - synced)
+                self._idle_synced_us.pop(atom, None)
 
         for atom in remove:
             self.all_atoms.discard(atom)
         for atom in add:
             self.all_atoms.add(atom)
-            self.idle_us.setdefault(atom, 0.0)
+            if self.track_idle:
+                self.idle_us.setdefault(atom, 0.0)
+                self._idle_synced_us[atom] = self.clock_us
 
     def record_1q_stage(self, circuit: Circuit, stage_idx: int, placement: Placement) -> None:
 
@@ -419,6 +470,7 @@ def simulate_one_qubit_circuit(circuit: Circuit, placement: Placement, model: Mo
     for stage_idx in range(len(circuit.stages)):
         schedule.record_1q_stage(circuit, stage_idx, placement)
 
+    schedule.finalize_idle()
     return schedule
 
 def circuit_fidelity(schedule: Schedule, *, d: int) -> float:
