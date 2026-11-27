@@ -21,7 +21,9 @@ dev = [
     "pytest-cov>=5.0",
 ]
 viz = [
-    "matplotlib>=3.8"
+    "matplotlib>=3.8",
+    "plotly>=5.24",
+    "kaleido>=0.2.1",
 ]
 docs = [
     "mkdocs-material>=9.5",
@@ -41,6 +43,9 @@ packages = ["src/nasim"]
 [tool.pytest.ini_options]
 testpaths = ["tests", "benchmarks"]
 addopts = "-ra"
+markers = [
+    "dim3d: 3D-specific tests (Device.layered, 3d.yaml preset, axial transport/movement)",
+]
 
 [tool.ruff]
 line-length = 100

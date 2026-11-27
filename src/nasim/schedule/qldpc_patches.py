@@ -15,6 +15,38 @@ from nasim.schedule.qldpc_memory import MemoryBlock, MemoryOccupancy
 from nasim.schedule.routing import _site_anchor, _site_is_free, _legalise_by_zone, _nearest_free_zone_site
 from nasim.surface_code import Patch
 
+def assign_ancilla_ports(device: Device, blocks: dict[int, MemoryBlock], *,
+                         ports_per_block: int = 2) -> dict[int, list[Position]]:
+
+    ent_zones = [z for z in device.zones if z.kind == "entanglement"]
+    if not ent_zones:
+        return {block_id: [] for block_id in blocks}
+
+    ent_zone = ent_zones[0]
+    min_y = min(s.y for s in ent_zone.sites)
+    boundary = sorted((s for s in ent_zone.sites if s.y == min_y), key=lambda s: s.x)
+
+    needed = ports_per_block * len(blocks)
+    if len(boundary) < needed:
+        raise ValueError("ent bound too small")
+
+    block_order = sorted(blocks.values(), key=lambda b: b.anchor.x)
+
+    return {
+        block.block_id: boundary[i * ports_per_block:(i+1) * ports_per_block]
+        for i, block in enumerate(block_order)
+    }
+
+def _free_port_site(port_sites: list[Position], placement: Placement, patch: Patch,
+                    unit_um: float, *, exclude_qubit: int) -> Position | None:
+
+    radius = patch.radius_um(unit_um)
+    for site in port_sites:
+        cand = _site_anchor(site, patch, unit_um)
+        if _site_is_free(cand, radius, placement, exclude_qubit=exclude_qubit): return cand
+
+    return None
+
 def _all_potential_atom_ids(num_qubits: int, blocks: dict[int, MemoryBlock], surface_distance: int) -> set[AtomId]:
 
     atoms: set[AtomId] = {a for block in blocks.values() for a in block.atom_ids()}
@@ -78,7 +110,7 @@ def _free_site_for_new_patch(device: Device, placement: Placement, patch: Patch,
     return best_anchor
 
 def _materialise_patch(current: Placement, device: Device, program_qubit: int,
-                       block_anchor: Position, *, surface_distance: int) -> Placement:
+                       port_sites: list[Position], *, surface_distance: int) -> Placement:
 
     patch = Patch.rotated(surface_distance)
     unit_um = current.model.gate_pair_dist_um
@@ -87,9 +119,7 @@ def _materialise_patch(current: Placement, device: Device, program_qubit: int,
     if not ent_zones:
         anchor = _free_site_for_new_patch(device, current, patch, unit_um)
     else:
-        radius = patch.radius_um(unit_um)
-        anchor = _nearest_free_zone_site(ent_zones[0], current, patch, unit_um,
-                                         block_anchor, radius=radius, exclude_qubit=-1)
+        anchor = _free_port_site(port_sites, current, patch, unit_um, exclude_qubit=-1)
         if anchor is None: raise ValueError("no free ent-zone site")
 
     new_patches = current.patches + (PlacedPatch(qubit=program_qubit, patch=patch, anchor=anchor),)
@@ -102,7 +132,7 @@ def _dissolve_patch(current: Placement, program_qubit: int, ) -> Placement:
     return Placement(model=current.model, patches=remaining)
 
 def _return_to_block(current: Placement, device: Device, schedule, program_qubit: int,
-                     block_anchor: Position) -> Placement:
+                     port_sites: list[Position]) -> Placement:
 
     ent_zones = [z for z in device.zones if z.kind == "entanglement"]
     if not ent_zones: return current
@@ -111,8 +141,7 @@ def _return_to_block(current: Placement, device: Device, schedule, program_qubit
     p = next(pp for pp in current.patches if pp.qubit == program_qubit)
     radius = p.patch.radius_um(unit_um)
 
-    site = _nearest_free_zone_site(ent_zones[0], current, p.patch, unit_um,
-                                   block_anchor, radius=radius, exclude_qubit=program_qubit)
+    site = _free_port_site(port_sites, current, p.patch, unit_um, exclude_qubit=program_qubit)
     if site is None: raise ValueError("no free site near block")
     if site == p.anchor: return current
 
@@ -130,7 +159,8 @@ def _return_to_block(current: Placement, device: Device, schedule, program_qubit
 def ensure_loaded_as_patches(current: Placement, device: Device, schedule, qubits: list[int],
                              circuit, stage_idx: int, blocks: dict[int, MemoryBlock],
                              occupancies: dict[int, MemoryOccupancy], ancillas: dict[int, LoadStoreAncilla],
-                             residency: ComputeResidency, *, qldpc_code_distance: int, surface_distance: int,
+                             residency: ComputeResidency, ports: dict[int, list[Position]],
+                             *, qldpc_code_distance: int, surface_distance: int,
                              compute_capacity: int) -> Placement:
 
     """
@@ -150,8 +180,9 @@ def ensure_loaded_as_patches(current: Placement, device: Device, schedule, qubit
         block_id = _find_block_holding(q, occupancies)
         if block_id is None: continue
 
-        if len(residency.resident_qubits()) >= compute_capacity:
-            evictable = [r for r in residency.resident_qubits() if r not in protected]
+        resident_in_block = [r for r in residency.resident_qubits() if residency.home_of(r)[0] == block_id]
+        if len(resident_in_block) >= len(ports[block_id]):
+            evictable = [r for r in resident_in_block if r not in protected]
             if not evictable: raise ValueError("at capacity and no evictables")
 
             worst = max(evictable, key=lambda r:(
@@ -178,21 +209,22 @@ def ensure_loaded_as_patches(current: Placement, device: Device, schedule, qubit
         present.add(q)
 
     for q, block_id in to_evict:
-        current = _return_to_block(current, device, schedule, q, blocks[block_id].anchor)
+        current = _return_to_block(current, device, schedule, q, ports[block_id])
 
     record_ldst_wave(schedule, list(per_block.values()), code_dist=qldpc_code_distance)
 
     for q, _ in to_evict:
         current = _dissolve_patch(current, q)
     for q, block_id in to_load:
-        current = _materialise_patch(current, device, q, blocks[block_id].anchor, surface_distance=surface_distance)
+        current = _materialise_patch(current, device, q, ports[block_id], surface_distance=surface_distance)
 
     return current
 
 def manage_qldpc_patches(current: Placement, device: Device, schedule, circuit, stage_idx: int,
                          blocks: dict[int, MemoryBlock], occupancies: dict[int, MemoryOccupancy],
                          ancillas: dict[int, LoadStoreAncilla], residency: ComputeResidency,
-                         involved: set[int], *, qldpc_code_distance: int, surface_distance: int,
+                         involved: set[int], ports: dict[int, list[Position]],
+                           *, qldpc_code_distance: int, surface_distance: int,
                          compute_capacity: int) -> Placement:
 
     """
@@ -219,7 +251,7 @@ def manage_qldpc_patches(current: Placement, device: Device, schedule, circuit, 
         dead = [q for q in evictable if next_use(q) is None]
         if dead:
             to_store = dead[0]
-        elif len(residency.resident_qubits()) >= compute_capacity and waiting_here and evictable:
+        elif len(resident_here) >= len(ports[block_id]) and waiting_here and evictable:
             urgent_cands = [q for q in waiting_here if next_use(q) is not None]
             most_urgent_waiting = min(urgent_cands, key=next_use, default=None)
             if most_urgent_waiting is not None:
@@ -228,16 +260,19 @@ def manage_qldpc_patches(current: Placement, device: Device, schedule, circuit, 
                     to_store = worst_resident
 
         block_seq: list[tuple] = []
+        resident_count_here = len(resident_here)
         if to_store is not None:
             _, slot = residency.home_of(to_store)
             block_seq.append(("store", block, occupancy, ancilla, slot, to_store))
             residency.mark_stored(to_store)
             waiting_here.append(to_store)
             to_evict.append((to_store, block_id))
+            resident_count_here -= 1
 
 
-        pending_mandatory = len([q for q in involved if not residency.is_resident(q)])
-        if (ancilla.is_free(schedule.clock_us) and len(residency.resident_qubits()) + pending_mandatory < compute_capacity):
+        pending_mandatory = len([q for q in involved if not residency.is_resident(q) and 
+                                 _find_block_holding(q, occupancies) == block_id])
+        if (ancilla.is_free(schedule.clock_us) and resident_count_here + pending_mandatory < len(ports[block_id])):
 
             cands = [q for q in waiting_here if next_use(q) is not None]
             if cands:
@@ -251,14 +286,14 @@ def manage_qldpc_patches(current: Placement, device: Device, schedule, circuit, 
             per_block[block_id] = block_seq
 
     for q, block_id in to_evict:
-        current = _return_to_block(current, device, schedule, q, blocks[block_id].anchor)
+        current = _return_to_block(current, device, schedule, q, ports[block_id])
 
     record_ldst_wave(schedule, list(per_block.values()), code_dist=qldpc_code_distance)
 
     for q, _ in to_evict:
         current = _dissolve_patch(current, q)
     for q, block_id in to_load:
-        current = _materialise_patch(current, device, q, blocks[block_id].anchor,
+        current = _materialise_patch(current, device, q, ports[block_id],
                                      surface_distance=surface_distance)
 
     return current

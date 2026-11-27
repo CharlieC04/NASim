@@ -129,13 +129,14 @@ class Device:
               entanglement_rows: int, entanglement_cols: int, entanglement_pitch: float, gap_um: float = 10.0,
               storage_num_aods: int = 1, entanglement_num_aods: int = 1,
               factory_rows: int | None = None, factory_cols: int | None = None,
-              factory_pitch_um: float | None = None, factory_num_aods: int = 1):
+              factory_pitch_um: float | None = None, factory_num_aods: int = 1,
+              factory_gap_um: float | None = None):
 
         """Build a two-zone device: a storage grid with the entanglement
         grid placed directly above it, separated by gap_um."""
 
         storage = SLM(rows=storage_rows, cols=storage_cols, pitch_x_um=storage_pitch_um, pitch_y_um=storage_pitch_um)
-        storage_height = (storage_rows - 1) * storage_pitch_um
+        storage_height = storage_rows * storage_pitch_um
         entanglement = SLM(rows=entanglement_rows, cols=entanglement_cols, pitch_x_um=entanglement_pitch, pitch_y_um=entanglement_pitch,
                            origin=Position(0.0, storage_height + gap_um, 0.0))
 
@@ -149,10 +150,15 @@ class Device:
         ]
 
         if factory_rows is not None:
-            entanglement_height = (entanglement_rows - 1) * entanglement_pitch
+
+            if factory_cols is None or factory_pitch_um is None:
+                raise ValueError("missing factory param")
+
+            f_gap_um = gap_um if factory_gap_um is None else factory_gap_um
+            entanglement_height = entanglement_rows * entanglement_pitch
             factory = SLM(rows=factory_rows, cols=factory_cols, pitch_x_um=factory_pitch_um,
                           pitch_y_um=factory_pitch_um, origin=Position(0.0, storage_height + 
-                                                                       gap_um + entanglement_height + gap_um, 0.0))
+                                                                       gap_um + entanglement_height + f_gap_um, 0.0))
             if _slms_overlap(entanglement, factory) or _slms_overlap(factory, storage):
                 raise ValueError("zones overlap")
 

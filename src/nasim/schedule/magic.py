@@ -6,6 +6,7 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 
 from nasim.device import Device
+from nasim.geometry import Position
 from nasim.move import Move, legalise_frames, moves_between
 from nasim.placement import Placement, PlacedPatch
 from nasim.resource import Factory
@@ -15,7 +16,8 @@ from nasim.surface_code import Patch
 
 PRIORITY_WEIGHT = 1.0
 
-def _ensure_placed(current: Placement, zone, resource_id: int, distance: int, reference_anchor) -> Placement:
+def _ensure_placed(current: Placement, zone, resource_id: int, distance: int, reference_anchor, *,
+                   site_filter=None) -> Placement:
 
     """
     Auto-place factory at nearest free zone site
@@ -27,7 +29,8 @@ def _ensure_placed(current: Placement, zone, resource_id: int, distance: int, re
     patch = Patch.rotated(distance)
     radius = patch.radius_um(unit_um)
 
-    site = _nearest_free_zone_site(zone, current, patch, unit_um, reference_anchor, radius=radius, exclude_qubit=resource_id)
+    site = _nearest_free_zone_site(zone, current, patch, unit_um, reference_anchor, radius=radius, 
+                                   exclude_qubit=resource_id, site_filter=site_filter)
     if site is None: raise ValueError("No free site to place factory")
 
     return Placement(model=current.model, patches=current.patches + (PlacedPatch(
@@ -58,7 +61,8 @@ def _best_other_source_us(current: Placement, schedule: Schedule, q: int, waitin
 
     return min(cands) if cands else None
 
-def _teleport_consume_batch(current: Placement, device: Device, schedule: Schedule, pairs: list[tuple[int, int]]) -> Placement:
+def _teleport_consume_batch(current: Placement, device: Device, schedule: Schedule, pairs: list[tuple[int, int]], *,
+                            reserved_sites: frozenset[Position] = frozenset()) -> Placement:
 
     """
     Route two qubits next to each other in Ez and consume via surgery
@@ -67,7 +71,8 @@ def _teleport_consume_batch(current: Placement, device: Device, schedule: Schedu
     working = current
     all_moves = []
     for q_a, q_b in pairs:
-        working, moves = _retarget_pair_into_entanglement_zone(working, device, q_a, q_b, all_moves)
+        working, moves = _retarget_pair_into_entanglement_zone(working, device, q_a, q_b, all_moves,
+                                                               reserved_sites=reserved_sites)
         all_moves.extend(moves)
 
     if all_moves:
@@ -88,7 +93,8 @@ def _teleport_consume_batch(current: Placement, device: Device, schedule: Schedu
     schedule.record_split_batch(splits)
     return working
 
-def _return_to_zone(current: Placement, device: Device, schedule: Schedule, zone, resource_id: int) -> Placement:
+def _return_to_zone(current: Placement, device: Device, schedule: Schedule, zone, resource_id: int, *,
+                    site_filter=None) -> Placement:
 
     """
     Return factory to nearest free zone site after delivery
@@ -97,7 +103,8 @@ def _return_to_zone(current: Placement, device: Device, schedule: Schedule, zone
     unit_um = schedule.model.gate_pair_dist_um
     p = next(pp for pp in current.patches if pp.qubit == resource_id)
     radius = p.patch.radius_um(unit_um)
-    site = _nearest_free_zone_site(zone, current, p.patch, unit_um, p.anchor, radius=radius, exclude_qubit=resource_id)
+    site = _nearest_free_zone_site(zone, current, p.patch, unit_um, p.anchor, radius=radius, 
+                                   exclude_qubit=resource_id, site_filter=site_filter)
     if site is None:
         raise ValueError("No free site for resource")
 
@@ -144,7 +151,8 @@ def _redistribution_delay_us(current: Placement, model, donor_id: int, receiver_
     return (15/8) * (distance_um / model.v_xy_um_per_us)
 
 def _resolve_magic_requests(current: Placement, device: Device, schedule: Schedule,
-                            factories: list[Factory], qubits: list[int]) -> Placement:
+                            factories: list[Factory], qubits: list[int], *,
+                            reserved_sites: frozenset[Position] = frozenset()) -> Placement:
 
     """
     Event-driven resolution of magic request in stage (FT-Weave)
@@ -162,10 +170,12 @@ def _resolve_magic_requests(current: Placement, device: Device, schedule: Schedu
 
     factory_zones = [z for z in device.zones if z.kind == "factory"]
     resource_zone = factory_zones[0] if factory_zones else ent_zone
+    resource_site_filter = None if factory_zones else (lambda pos: pos not in reserved_sites)
 
     reference_anchor = next(p.anchor for p in current.patches if p.qubit == qubits[0])
     for f in factories:
-        current = _ensure_placed(current, resource_zone, f.resource_id, f.distance, reference_anchor)
+        current = _ensure_placed(current, resource_zone, f.resource_id, f.distance, reference_anchor,
+                                 site_filter=resource_site_filter)
 
     by_id = {f.resource_id: f for f in factories}
     remaining = list(qubits)
@@ -197,10 +207,12 @@ def _resolve_magic_requests(current: Placement, device: Device, schedule: Schedu
             to_deliver.append((fid, q))
 
         if to_deliver:
-            current = _teleport_consume_batch(current, device, schedule, to_deliver)
+            current = _teleport_consume_batch(current, device, schedule, to_deliver,
+                                              reserved_sites=reserved_sites)
 
             for fid, q in to_deliver:
-                current = _return_to_zone(current, device, schedule, resource_zone, fid)
+                current = _return_to_zone(current, device, schedule, resource_zone, fid,
+                                          site_filter=resource_site_filter)
                 wait_for_rus_ids.remove(fid)
                 remaining.remove(q)
                 waiting_since_us.pop(q, None)

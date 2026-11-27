@@ -148,11 +148,12 @@ def _retarget_adjacent(placement: Placement, qa: int, qb: int, committed: list[M
     return Placement(model=placement.model, patches=patches), moves
 
 def _nearest_free_zone_site(zone, placement: Placement, patch: Patch, unit_um: float, anchor: Position, *,
-                            radius: float, exclude_qubit: int) -> Position | None:
+                            radius: float, exclude_qubit: int, site_filter=None) -> Position | None:
 
     best_site, best_d = None, math.inf
     for site in zone.sites:
         candidate = _site_anchor(site, patch, unit_um)
+        if site_filter is not None and not site_filter(candidate): continue
         if not _site_is_free(candidate, radius, placement, exclude_qubit=exclude_qubit): continue
         d = math.hypot(candidate.x - anchor.x, candidate.y - anchor.y)
         if d < best_d:
@@ -161,7 +162,8 @@ def _nearest_free_zone_site(zone, placement: Placement, patch: Patch, unit_um: f
     return best_site
 
 def _retarget_pair_into_entanglement_zone(placement: Placement, device: Device, qa: int, qb: int,
-                                          committed: list[Move], *, lambda_par: float = 25.0):
+                                          committed: list[Move], *, lambda_par: float = 25.0,
+                                          reserved_sites: frozenset[Position] = frozenset()):
 
     pa = next(p for p in placement.patches if p.qubit == qa)
     pb = next(p for p in placement.patches if p.qubit == qb)
@@ -177,12 +179,32 @@ def _retarget_pair_into_entanglement_zone(placement: Placement, device: Device, 
     unit_um = placement.model.gate_pair_dist_um
     radius_a = pa.patch.radius_um(unit_um)
 
+    # Ordinary merge routing (_best_candidate/_cand_anchor) chains new
+    # anchors off an existing patch's position by a fixed offset -- it
+    # isn't confined to the zone's discrete site grid, so a candidate
+    # can land close enough to a reserved ld/st port to physically block
+    # it (overlap the clearance radius) without ever exactly equaling
+    # the port's own anchor. Reject by proximity, not just equality.
+    def not_reserved(pos: Position) -> bool:
+        if not ent_zone.contains(pos):
+            return False
+        return all(
+            math.hypot(pos.x - site.x, pos.y - site.y) >= 2 * radius_a - 1e-6
+            for site in reserved_sites
+        )
+
     moves: list[Move] = []
     working = placement
 
-    if not ent_zone.contains(pa.anchor):
+    # A patch may already be inside the entanglement zone yet sitting
+    # exactly on a reserved ld/st port (e.g. it was just loaded there) --
+    # it still needs to vacate the port before an ordinary merge, since
+    # staying parked there would block the block's ancilla from loading
+    # or storing anyone else.
+    if not ent_zone.contains(pa.anchor) or pa.anchor in reserved_sites:
 
-        target = _nearest_free_zone_site(ent_zone, working, pa.patch, unit_um, pa.anchor, radius=radius_a, exclude_qubit=qa)
+        target = _nearest_free_zone_site(ent_zone, working, pa.patch, unit_um, pa.anchor, radius=radius_a, exclude_qubit=qa,
+                                         site_filter=not_reserved)
         if target is None: raise ValueError("No free Ez site")
 
         move_a = Move(qubit=qa, source=pa.anchor, target=target, clearance_um=radius_a)
@@ -193,7 +215,8 @@ def _retarget_pair_into_entanglement_zone(placement: Placement, device: Device, 
         working = Placement(model=working.model, patches=patches)
         moves.append(move_a)
 
-    working, moves_b = _retarget_adjacent(working, qa, qb, committed + moves, lambda_par=lambda_par, site_filter=ent_zone.contains, zone=ent_zone)
+    working, moves_b = _retarget_adjacent(working, qa, qb, committed + moves, lambda_par=lambda_par, 
+                                          site_filter=not_reserved, zone=ent_zone)
     moves.extend(moves_b)
 
     return working, moves

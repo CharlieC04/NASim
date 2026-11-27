@@ -104,7 +104,7 @@ class Model:
             handover_time_us=transport["handover_time_us"],
             handover_fidelity=transport["handover_fidelity"],
             move_profile=transport["move_profile"],
-            axial_clearance_um=transport.get("axial_clearance_um", 0.0),
+            axial_clearance_um=geometry.get("axial_clearance_um", 0.0),
             addressing=data["addressing"],
             readout_fidelity=readout["fidelity"],
             readout_time_us=readout["time_us"],

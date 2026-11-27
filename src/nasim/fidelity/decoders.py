@@ -75,15 +75,7 @@ def build_gen_bicycle_xz_decoder(circuit: stim.Circuit, *, basis_coord: int, max
                                  osd_order: int = 10, bp_method: str = "minimum_sum"):
 
     """
-    One-time setup for decode_gen_bicycle_xz_split: builds the DEM, walks
-    every mechanism to build the check/observable matrices, and
-    constructs the BpOsdDecoder. This is the expensive part (the DEM walk
-    alone is a pure-Python loop over every mechanism -- ~11.5s for
-    BB_144_12_12 at 12 rounds) and depends only on the circuit, not on
-    which shots get decoded -- so callers doing many batches against the
-    SAME circuit (e.g. calibrate_gen_bicycle_code's adaptive loop) should
-    call this once and reuse the result via decode_with_prebuilt_decoder,
-    not call decode_gen_bicycle_xz_split per batch.
+    One-time setup for decode_gen_bicycle_xz_split
     """
 
     dem = circuit.detector_error_model(decompose_errors=False)
@@ -151,13 +143,6 @@ def decode_gen_bicycle_xz_split(circuit: stim.Circuit, detection_events: np.ndar
 
     """
     BP+OSD decoding doing X/Z in seq, following QS.
-
-    Convenience one-shot wrapper (build + decode together) -- for
-    anything that calls this more than once against the same circuit,
-    call build_gen_bicycle_xz_decoder once and decode_with_prebuilt_decoder
-    per batch instead; this function rebuilds the decoder from scratch
-    every call, which is fine for a single decode but very wasteful
-    across repeated batches (see build_gen_bicycle_xz_decoder's docstring).
     """
 
     decoder, relevant_arr, obs_matrix = build_gen_bicycle_xz_decoder(
